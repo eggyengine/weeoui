@@ -101,6 +101,28 @@ pub fn TextEdit(comptime capacity: usize) type {
             self.preferred_x = null;
         }
 
+        pub fn selectWord(self: *Self) void {
+            if (self.len == 0) return;
+            const value = self.text();
+            const at = if (self.cursor == self.len) previous(value, self.cursor) else self.cursor;
+            const group = kind(value[at]);
+            var start = at;
+            while (start > 0 and kind(value[previous(value, start)]) == group) start = previous(value, start);
+            var end = next(value, at);
+            while (end < value.len and kind(value[end]) == group) end = next(value, end);
+            self.anchor = start;
+            self.cursor = end;
+            self.preferred_x = null;
+        }
+
+        pub fn selectLine(self: *Self) void {
+            const value = self.text();
+            self.anchor = lineStart(value, self.cursor);
+            self.cursor = lineEnd(value, self.cursor);
+            if (self.cursor < value.len) self.cursor += 1;
+            self.preferred_x = null;
+        }
+
         pub fn setCursor(self: *Self, at: usize, extend: bool) Error!void {
             if (!isBoundary(self.text(), at)) return error.InvalidBoundary;
             self.moveTo(at, extend);
@@ -550,6 +572,25 @@ test "word and hard-line navigation never split codepoints" {
     try std.testing.expectEqual(@as(usize, 1), edit.cursor);
     edit.moveVertical(&font, 16, .down, false);
     try std.testing.expectEqual(@as(usize, 13), edit.cursor);
+}
+
+test "word and line selections preserve UTF-8 boundaries and hard newlines" {
+    var edit = try TextEdit(64).init("hi, 世界!\nalpha beta\nz");
+    try edit.setCursor(4, false);
+    edit.selectWord();
+    const word = edit.selection().?;
+    try std.testing.expectEqualStrings("世界", edit.text()[word.start..word.end]);
+    edit.selectLine();
+    const line = edit.selection().?;
+    try std.testing.expectEqualStrings("hi, 世界!\n", edit.text()[line.start..line.end]);
+    const beta = std.mem.indexOf(u8, edit.text(), "beta").?;
+    try edit.setCursor(beta + 1, false);
+    edit.selectWord();
+    const last_word = edit.selection().?;
+    try std.testing.expectEqualStrings("beta", edit.text()[last_word.start..last_word.end]);
+    edit.selectLine();
+    const second_line = edit.selection().?;
+    try std.testing.expectEqualStrings("alpha beta\n", edit.text()[second_line.start..second_line.end]);
 }
 
 test "undo and redo preserve selection and invalidate redo on edit" {

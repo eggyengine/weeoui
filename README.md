@@ -116,8 +116,10 @@ For editable text, retain a `weeoui.TextEdit(128)` per field and pass its
 `text()`, `cursor`, and `selection()` into `weeoui.Input`. Pass SDL text events
 through `insert`, keyboard actions through `moveLeft`/`moveRight`/`undo`, and
 IME preedit through `Input.composition`; the editor validates UTF-8, bounds,
-and codepoint boundaries. `Input` handles focus, caret, selection, and
-composition painting. Use `b.animatedSkeleton(width, height, phase)` and
+and codepoint boundaries. `selectWord()` and `selectLine()` provide
+multi-click selection without splitting UTF-8 codepoints. `Input` handles
+focus, caret, selection, and composition painting. Use
+`b.animatedSkeleton(width, height, phase)` and
 `b.spinner(phase)` for time-driven loading feedback.
 UI strings
 currently render printable ASCII; non-ASCII text uses a fallback glyph until
