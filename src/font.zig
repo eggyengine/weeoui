@@ -3,8 +3,8 @@ const std = @import("std");
 const c = @import("freetype").c;
 const Rect = @import("types.zig").Rect;
 
-pub const atlas_width = 512;
-pub const atlas_height = 512;
+pub const atlas_width = 1024;
+pub const atlas_height = 1024;
 
 pub const Glyph = struct {
     x: u16 = 0,
@@ -17,11 +17,19 @@ pub const Glyph = struct {
 };
 
 pub const Font = struct {
+    pub const Strike = struct {
+        size: f32 = 0,
+        ascent: f32 = 0,
+        glyphs: [95]Glyph = [_]Glyph{.{}} ** 95,
+        pub fn glyph(self: *const Strike, byte: u8) Glyph {
+            return self.glyphs[if (byte >= 32 and byte <= 126) byte - 32 else '?' - 32];
+        }
+    };
     allocator: std.mem.Allocator,
     pixels: []u8,
-    glyphs: [95]Glyph = [_]Glyph{.{}} ** 95,
+    strikes: [5]Strike = [_]Strike{.{}} ** 5,
     size: f32,
-    ascent: f32,
+    dpi_scale: f32 = 1,
 
     /// Rasterize printable ASCII from any TTF/OTF bytes. Bytes are borrowed only during init.
     pub fn init(allocator: std.mem.Allocator, bytes: []const u8, pixel_size: u32) !Font {
@@ -32,48 +40,57 @@ pub const Font = struct {
         var face: c.FT_Face = undefined;
         if (c.FT_New_Memory_Face(library, bytes.ptr, @intCast(bytes.len), 0, &face) != 0) return error.InvalidFont;
         defer _ = c.FT_Done_Face(face);
-        if (c.FT_Set_Pixel_Sizes(face, 0, pixel_size) != 0) return error.InvalidFontSize;
         const pixels = try allocator.alloc(u8, atlas_width * atlas_height);
         errdefer allocator.free(pixels);
         @memset(pixels, 0);
         pixels[0] = 255; // White texel for untextured shapes.
-        var font = Font{ .allocator = allocator, .pixels = pixels, .size = @floatFromInt(pixel_size), .ascent = @floatFromInt(face.*.size.*.metrics.ascender >> 6) };
+        var font = Font{ .allocator = allocator, .pixels = pixels, .size = @floatFromInt(pixel_size) };
         var pen_x: usize = 2;
         var pen_y: usize = 2;
         var row_h: usize = 0;
-        for (32..127) |codepoint| {
-            if (c.FT_Load_Char(face, codepoint, c.FT_LOAD_RENDER) != 0) return error.GlyphLoadFailed;
-            const slot = face.*.glyph;
-            const bitmap = slot.*.bitmap;
-            const w: usize = @intCast(bitmap.width);
-            const h: usize = @intCast(bitmap.rows);
-            if (bitmap.pixel_mode != c.FT_PIXEL_MODE_GRAY and w * h != 0) return error.UnsupportedGlyphBitmap;
-            if (pen_x + w + 1 > atlas_width) {
-                pen_x = 2;
-                pen_y += row_h + 2;
-                row_h = 0;
+        const sizes = [5]u32{ @max(1, pixel_size / 2), @max(1, pixel_size * 3 / 4), pixel_size, @min(64, pixel_size * 3 / 2), @min(64, pixel_size * 2) };
+        for (sizes, 0..) |strike_size, strike_index| {
+            if (strike_index > 0 and strike_size == sizes[strike_index - 1]) {
+                font.strikes[strike_index] = font.strikes[strike_index - 1];
+                continue;
             }
-            if (pen_y + h + 1 > atlas_height) return error.AtlasFull;
-            if (w * h != 0) {
-                const source: [*]const u8 = @ptrCast(bitmap.buffer);
-                const pitch: isize = bitmap.pitch;
-                for (0..h) |row| {
-                    const source_row = if (pitch >= 0) row else h - 1 - row;
-                    const start = source_row * @as(usize, @intCast(@abs(pitch)));
-                    @memcpy(pixels[(pen_y + row) * atlas_width + pen_x ..][0..w], source[start..][0..w]);
+            if (c.FT_Set_Pixel_Sizes(face, 0, strike_size) != 0) return error.InvalidFontSize;
+            font.strikes[strike_index].size = @floatFromInt(strike_size);
+            font.strikes[strike_index].ascent = @floatFromInt(face.*.size.*.metrics.ascender >> 6);
+            for (32..127) |codepoint| {
+                if (c.FT_Load_Char(face, codepoint, c.FT_LOAD_RENDER) != 0) return error.GlyphLoadFailed;
+                const slot = face.*.glyph;
+                const bitmap = slot.*.bitmap;
+                const w: usize = @intCast(bitmap.width);
+                const h: usize = @intCast(bitmap.rows);
+                if (bitmap.pixel_mode != c.FT_PIXEL_MODE_GRAY and w * h != 0) return error.UnsupportedGlyphBitmap;
+                if (pen_x + w + 1 > atlas_width) {
+                    pen_x = 2;
+                    pen_y += row_h + 2;
+                    row_h = 0;
                 }
+                if (pen_y + h + 1 > atlas_height) return error.AtlasFull;
+                if (w * h != 0) {
+                    const source: [*]const u8 = @ptrCast(bitmap.buffer);
+                    const pitch: isize = bitmap.pitch;
+                    for (0..h) |row| {
+                        const source_row = if (pitch >= 0) row else h - 1 - row;
+                        const start = source_row * @as(usize, @intCast(@abs(pitch)));
+                        @memcpy(pixels[(pen_y + row) * atlas_width + pen_x ..][0..w], source[start..][0..w]);
+                    }
+                }
+                font.strikes[strike_index].glyphs[codepoint - 32] = .{
+                    .x = @intCast(pen_x),
+                    .y = @intCast(pen_y),
+                    .w = @intCast(w),
+                    .h = @intCast(h),
+                    .left = @intCast(slot.*.bitmap_left),
+                    .top = @intCast(slot.*.bitmap_top),
+                    .advance = @as(f32, @floatFromInt(slot.*.advance.x)) / 64,
+                };
+                pen_x += w + 2;
+                row_h = @max(row_h, h);
             }
-            font.glyphs[codepoint - 32] = .{
-                .x = @intCast(pen_x),
-                .y = @intCast(pen_y),
-                .w = @intCast(w),
-                .h = @intCast(h),
-                .left = @intCast(slot.*.bitmap_left),
-                .top = @intCast(slot.*.bitmap_top),
-                .advance = @as(f32, @floatFromInt(slot.*.advance.x)) / 64,
-            };
-            pen_x += w + 2;
-            row_h = @max(row_h, h);
         }
         return font;
     }
@@ -82,19 +99,28 @@ pub const Font = struct {
         self.allocator.free(self.pixels);
     }
     pub fn glyph(self: *const Font, byte: u8) Glyph {
-        return self.glyphs[if (byte >= 32 and byte <= 126) byte - 32 else '?' - 32];
+        return self.strikes[2].glyph(byte);
+    }
+    pub fn strike(self: *const Font, requested_size: f32) *const Strike {
+        var best: usize = 0;
+        for (1..self.strikes.len) |i| {
+            if (@abs(self.strikes[i].size - requested_size * self.dpi_scale) < @abs(self.strikes[best].size - requested_size * self.dpi_scale)) best = i;
+        }
+        return &self.strikes[best];
     }
     pub fn measure(self: *const Font, value: []const u8, size: f32) f32 {
+        const selected = self.strike(size);
         var width: f32 = 0;
         for (value) |byte| {
             if (byte & 0xc0 == 0x80) continue;
-            width += self.glyph(byte).advance * size / self.size;
+            width += selected.glyph(byte).advance * size / selected.size;
         }
         return width;
     }
     /// Visible glyph bounds relative to Canvas.text's origin.
     pub fn inkBounds(self: *const Font, value: []const u8, size: f32) Rect {
-        const scale = size / self.size;
+        const selected = self.strike(size);
+        const scale = size / selected.size;
         var pen: f32 = 0;
         var left: f32 = std.math.inf(f32);
         var top: f32 = std.math.inf(f32);
@@ -102,10 +128,10 @@ pub const Font = struct {
         var bottom: f32 = -std.math.inf(f32);
         for (value) |byte| {
             if (byte & 0xc0 == 0x80) continue;
-            const g = self.glyph(byte);
+            const g = selected.glyph(byte);
             if (g.w > 0 and g.h > 0) {
                 const x = pen + @as(f32, @floatFromInt(g.left)) * scale;
-                const y = (self.ascent - @as(f32, @floatFromInt(g.top))) * scale;
+                const y = (selected.ascent - @as(f32, @floatFromInt(g.top))) * scale;
                 left = @min(left, x);
                 top = @min(top, y);
                 right = @max(right, x + @as(f32, @floatFromInt(g.w)) * scale);
@@ -158,4 +184,10 @@ test "rasterize supplied font and measure text" {
     defer font.deinit();
     try std.testing.expect(font.measure("Hello", 16) > font.measure("Hi", 16));
     try std.testing.expect(font.glyph('A').w > 0);
+    try std.testing.expectEqual(@as(f32, 16), font.strike(15).size);
+    try std.testing.expectEqual(@as(f32, 24), font.strike(22).size);
+    try std.testing.expectEqual(@as(f32, 32), font.strike(30).size);
+    font.dpi_scale = 2;
+    try std.testing.expectEqual(@as(f32, 32), font.strike(16).size);
+    try std.testing.expectEqual(@as(f32, 48), font.strike(24).size);
 }

@@ -32,14 +32,15 @@ pub const Canvas = struct {
     }
     pub fn text(self: *Canvas, x: f32, y: f32, value: []const u8, size: f32, color: Color) !void {
         if (size <= 0) return;
-        const scale = size / self.font.size;
+        const strike = self.font.strike(size);
+        const scale = size / strike.size;
         var at = x;
         // ponytail: atlas covers printable ASCII; other Unicode codepoints show one fallback glyph until dynamic atlases are needed.
         for (value) |byte| {
             if (byte & 0xc0 == 0x80) continue;
-            const g = self.font.glyph(byte);
+            const g = strike.glyph(byte);
             if (g.w > 0 and g.h > 0) try self.quad(
-                .{ .x = at + @as(f32, @floatFromInt(g.left)) * scale, .y = y + (self.font.ascent - @as(f32, @floatFromInt(g.top))) * scale, .w = @as(f32, @floatFromInt(g.w)) * scale, .h = @as(f32, @floatFromInt(g.h)) * scale },
+                .{ .x = at + @as(f32, @floatFromInt(g.left)) * scale, .y = y + (strike.ascent - @as(f32, @floatFromInt(g.top))) * scale, .w = @as(f32, @floatFromInt(g.w)) * scale, .h = @as(f32, @floatFromInt(g.h)) * scale },
                 .{ .x = @as(f32, @floatFromInt(g.x)) / atlas_width, .y = @as(f32, @floatFromInt(g.y)) / atlas_height, .w = @as(f32, @floatFromInt(g.w)) / atlas_width, .h = @as(f32, @floatFromInt(g.h)) / atlas_height },
                 color,
             );

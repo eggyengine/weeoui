@@ -31,6 +31,7 @@ pub const Paint = union(enum) {
     button: struct { label: []const u8, primary: bool = true, hot: bool, focused: bool },
     checkbox: struct { label: []const u8, checked: bool, focused: bool },
     toggle: struct { label: []const u8, enabled: bool, focused: bool },
+    scrollbar: struct { state: *ScrollState, axis: ScrollState.Axis },
     custom: struct {
         context: *const anyopaque,
         measure: ?*const fn (*const anyopaque, f32, *const Font) f32 = null,
@@ -77,10 +78,10 @@ pub const Element = struct {
             .button => |b| try @import("components/button.zig").draw(c, self.bounds, b.label, b.primary, b.hot, b.focused),
             .checkbox => |b| try @import("components/checkbox.zig").draw(c, self.bounds, b.label, b.checked, b.focused),
             .toggle => |b| try @import("components/toggle.zig").draw(c, self.bounds, b.label, b.enabled, b.focused),
+            .scrollbar => |bar| try bar.state.drawBar(c, bar.axis),
             .custom => |custom| try custom.draw(custom.context, c, self.bounds),
         }
         for (self.children) |child| try child.draw(c);
-        if (self.scroll) |scroll| try scroll.draw(c);
     }
 };
 
@@ -134,6 +135,13 @@ fn estimatedHeight(node: *const Element, width: f32, font: *const Font) f32 {
 fn place(node: *Element, r: Rect, inherited_clip: Rect, font: *const Font) void {
     node.bounds = r;
     node.clip = inherited_clip;
+    switch (node.paint_kind) {
+        .scrollbar => |bar| switch (bar.axis) {
+            .vertical => bar.state.vertical_bar = r,
+            .horizontal => bar.state.horizontal_bar = r,
+        },
+        else => {},
+    }
     const p = node.style.padding;
     const inner_width = @max(0, r.w - p.left - p.right);
     const inner_height = @max(0, r.h - p.top - p.bottom);
