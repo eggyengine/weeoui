@@ -13,6 +13,7 @@ pub const Canvas = struct {
     font: *const Font,
     len: usize = 0,
     theme: types.Theme = .{},
+    clip: ?Rect = null,
 
     pub fn init(vertices: []Vertex, font: *const Font) Canvas {
         return .{ .vertices = vertices, .font = font };
@@ -57,14 +58,29 @@ pub const Canvas = struct {
         };
         try self.text(x, center.y - ink.y - ink.h / 2, value, size, color);
     }
+    pub fn textWrappedIn(self: *Canvas, r: Rect, value: []const u8, size: f32, color: Color) !void {
+        var iter = self.font.lines(value, size, r.w);
+        var y = r.y;
+        const line_height = size * 1.35;
+        while (iter.next()) |line| {
+            try self.textIn(.{ .x = r.x, .y = y, .w = r.w, .h = line_height }, line, size, color, .start);
+            y += line_height;
+        }
+    }
     fn quad(self: *Canvas, r: Rect, uv: Rect, color: Color) !void {
         if (r.w <= 0 or r.h <= 0) return;
+        const visible = if (self.clip) |clip| r.intersection(clip) else r;
+        if (visible.w <= 0 or visible.h <= 0) return;
         if (self.len + 6 > self.vertices.len) return error.OutOfVertices;
         const rgba: [4]f32 = .{ color[0], color[1], color[2], 1 };
-        const a = Vertex{ .position = .{ r.x, r.y }, .color = rgba, .uv = .{ uv.x, uv.y } };
-        const b = Vertex{ .position = .{ r.x + r.w, r.y }, .color = rgba, .uv = .{ uv.x + uv.w, uv.y } };
-        const c = Vertex{ .position = .{ r.x + r.w, r.y + r.h }, .color = rgba, .uv = .{ uv.x + uv.w, uv.y + uv.h } };
-        const d = Vertex{ .position = .{ r.x, r.y + r.h }, .color = rgba, .uv = .{ uv.x, uv.y + uv.h } };
+        const u_start = uv.x + (visible.x - r.x) / r.w * uv.w;
+        const v_start = uv.y + (visible.y - r.y) / r.h * uv.h;
+        const u_end = uv.x + (visible.x + visible.w - r.x) / r.w * uv.w;
+        const v_end = uv.y + (visible.y + visible.h - r.y) / r.h * uv.h;
+        const a = Vertex{ .position = .{ visible.x, visible.y }, .color = rgba, .uv = .{ u_start, v_start } };
+        const b = Vertex{ .position = .{ visible.x + visible.w, visible.y }, .color = rgba, .uv = .{ u_end, v_start } };
+        const c = Vertex{ .position = .{ visible.x + visible.w, visible.y + visible.h }, .color = rgba, .uv = .{ u_end, v_end } };
+        const d = Vertex{ .position = .{ visible.x, visible.y + visible.h }, .color = rgba, .uv = .{ u_start, v_end } };
         const triangles = [_]Vertex{ a, b, c, a, c, d };
         @memcpy(self.vertices[self.len..][0..6], &triangles);
         self.len += 6;
@@ -103,4 +119,17 @@ test "text ink is centered in its rectangle" {
     }
     try std.testing.expectApproxEqAbs(area.center().x, (left + right) / 2, 0.01);
     try std.testing.expectApproxEqAbs(area.center().y, (top + bottom) / 2, 0.01);
+}
+
+test "clip trims geometry to the viewport" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var vertices: [6]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    canvas.clip = .{ .x = 10, .y = 10, .w = 20, .h = 20 };
+    try canvas.rect(.{ .x = 0, .y = 0, .w = 40, .h = 40 }, .{ 1, 1, 1 });
+    for (canvas.items()) |vertex| {
+        try std.testing.expect(vertex.position[0] >= 10 and vertex.position[0] <= 30);
+        try std.testing.expect(vertex.position[1] >= 10 and vertex.position[1] <= 30);
+    }
 }

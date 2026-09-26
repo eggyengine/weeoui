@@ -12,6 +12,11 @@ pub const Rect = struct {
     pub fn contains(self: Rect, x: f32, y: f32) bool {
         return x >= self.x and y >= self.y and x < self.x + self.w and y < self.y + self.h;
     }
+    pub fn intersection(self: Rect, other: Rect) Rect {
+        const x = @max(self.x, other.x);
+        const y = @max(self.y, other.y);
+        return .{ .x = x, .y = y, .w = @max(0, @min(self.x + self.w, other.x + other.w) - x), .h = @max(0, @min(self.y + self.h, other.y + other.h) - y) };
+    }
 };
 pub const Theme = struct {
     background: Color = .{ 0.965, 0.968, 0.973 },

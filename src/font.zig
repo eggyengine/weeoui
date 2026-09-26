@@ -116,6 +116,41 @@ pub const Font = struct {
         if (left == std.math.inf(f32)) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
         return .{ .x = left, .y = top, .w = right - left, .h = bottom - top };
     }
+    pub const Lines = struct {
+        font: *const Font,
+        value: []const u8,
+        size: f32,
+        width: f32,
+        at: usize = 0,
+
+        pub fn next(self: *Lines) ?[]const u8 {
+            if (self.at >= self.value.len) return null;
+            const start = self.at;
+            var end = start;
+            var break_at: ?usize = null;
+            while (end < self.value.len) : (end += 1) {
+                if (self.value[end] == '\n') break;
+                if (self.value[end] == ' ') break_at = end;
+                // ponytail: quadratic for short UI labels; cache advances if long documents use this path.
+                if (end > start and self.font.measure(self.value[start .. end + 1], self.size) > @max(1, self.width)) {
+                    end = break_at orelse end;
+                    break;
+                }
+            }
+            self.at = end;
+            while (self.at < self.value.len and (self.value[self.at] == ' ' or self.value[self.at] == '\n')) self.at += 1;
+            return self.value[start..end];
+        }
+    };
+    pub fn lines(self: *const Font, value: []const u8, size: f32, width: f32) Lines {
+        return .{ .font = self, .value = value, .size = size, .width = width };
+    }
+    pub fn wrappedHeight(self: *const Font, value: []const u8, size: f32, width: f32) f32 {
+        var iter = self.lines(value, size, width);
+        var count: usize = 0;
+        while (iter.next()) |_| count += 1;
+        return @as(f32, @floatFromInt(@max(1, count))) * size * 1.35;
+    }
 };
 
 test "rasterize supplied font and measure text" {
