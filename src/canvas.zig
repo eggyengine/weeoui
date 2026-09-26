@@ -14,6 +14,7 @@ pub const Canvas = struct {
     len: usize = 0,
     theme: types.Theme = .{},
     clip: ?Rect = null,
+    pixel_scale: [2]f32 = .{ 1, 1 },
 
     pub fn init(vertices: []Vertex, font: *const Font) Canvas {
         return .{ .vertices = vertices, .font = font };
@@ -22,7 +23,14 @@ pub const Canvas = struct {
         return self.vertices[0..self.len];
     }
     pub fn rect(self: *Canvas, r: Rect, color: Color) !void {
-        try self.quad(r, .{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 }, color);
+        if (r.w <= 0 or r.h <= 0) return;
+        const sx = self.pixel_scale[0];
+        const sy = self.pixel_scale[1];
+        const x = @round(r.x * sx);
+        const y = @round(r.y * sy);
+        const right = @max(x + 1, @round((r.x + r.w) * sx));
+        const bottom = @max(y + 1, @round((r.y + r.h) * sy));
+        try self.quad(.{ .x = x / sx, .y = y / sy, .w = (right - x) / sx, .h = (bottom - y) / sy }, .{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 }, color);
     }
     pub fn outline(self: *Canvas, r: Rect, color: Color) !void {
         try self.rect(.{ .x = r.x, .y = r.y, .w = r.w, .h = 1 }, color);
@@ -133,4 +141,19 @@ test "clip trims geometry to the viewport" {
         try std.testing.expect(vertex.position[0] >= 10 and vertex.position[0] <= 30);
         try std.testing.expect(vertex.position[1] >= 10 and vertex.position[1] <= 30);
     }
+}
+
+test "solid rectangles snap to physical pixels without changing text vertices" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var vertices: [24]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    canvas.pixel_scale = .{ 2, 2 };
+    try canvas.rect(.{ .x = 1.2, .y = 2.2, .w = 3.1, .h = 4.1 }, .{ 1, 1, 1 });
+    try std.testing.expectEqual(@as(f32, 1), canvas.items()[0].position[0]);
+    try std.testing.expectEqual(@as(f32, 2), canvas.items()[0].position[1]);
+    const before = canvas.len;
+    try canvas.text(1.2, 2.2, "A", 16, .{ 1, 1, 1 });
+    const strike = font.strike(16);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.2) + @as(f32, @floatFromInt(strike.glyph('A').left)) * 16 / strike.size, canvas.items()[before].position[0], 0.001);
 }
