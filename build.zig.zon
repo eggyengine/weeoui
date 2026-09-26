@@ -1,0 +1,7 @@
+.{
+    .name = .weeoui,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+    .fingerprint = 0xdf62bb844157c203,
+}
