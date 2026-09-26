@@ -525,9 +525,7 @@ fn place(node: *Element, r: Rect, inherited_clip: Rect, font: *const Font) void 
         }
     }
     if (node.scroll) |scroll| {
-        scroll.viewport = r;
-        scroll.content = Vec2.init(content_width, content_height);
-        scroll.clamp();
+        scroll.updateLayout(r, Vec2.init(content_width, content_height));
     }
     const dx: f32 = if (node.scroll) |scroll| scroll.offset.x else 0;
     const dy: f32 = if (node.scroll) |scroll| scroll.offset.y else 0;

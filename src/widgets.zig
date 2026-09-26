@@ -9,6 +9,10 @@ pub const Section = struct { id: u32, title: []const u8, open: bool = false, con
 pub const Date = struct { year: u16, month: u8, day: u8 = 0, hour: u8 = 0, minute: u8 = 0 };
 pub const Modal = enum { dialog, alert_dialog, sheet, drawer };
 pub const TableOptions = struct { lines: bool = false };
+pub const MessageScrollOptions = struct {
+    alignment: enum { start, center, end, nearest } = .nearest,
+    margin: f32 = 0,
+};
 
 pub fn field(b: L.Builder, id: u32, name: []const u8, opts: primitives.Input) !*L.Element {
     const input = try b.input(id, opts);
@@ -333,7 +337,36 @@ pub fn messageScroller(b: L.Builder, viewport: Rect, state: *L.ScrollState, mess
     log.accessibility = .{ .role = .log, .live = .polite };
     const region = try scrollArea(b, viewport, state, &.{log});
     region.accessibility = .{ .role = .region, .label = "Messages" };
+    state.message_mode = true;
     return region;
+}
+
+pub fn scrollToMessage(region: *const L.Element, id: u32, options: MessageScrollOptions) !bool {
+    if (!std.math.isFinite(options.margin) or options.margin < 0) return error.InvalidSize;
+    const state = region.scroll orelse return error.InvalidScroller;
+    if (!state.message_mode or region.children.len != 1) return error.InvalidScroller;
+    if (region.bounds.w <= 0 or region.bounds.h <= 0 or state.viewport.h <= 0) return error.UnlaidOut;
+    for (region.children[0].children) |message_node| {
+        if (message_node.id != id or id == 0) continue;
+        const top = message_node.bounds.y - region.bounds.y + state.offset.y;
+        const bottom = top + message_node.bounds.h;
+        const viewport_bottom = state.offset.y + state.viewport.h;
+        const requested = switch (options.alignment) {
+            .start => top - options.margin,
+            .center => top + message_node.bounds.h / 2 - state.viewport.h / 2,
+            .end => bottom + options.margin - state.viewport.h,
+            .nearest => if (top < state.offset.y + options.margin)
+                top - options.margin
+            else if (bottom > viewport_bottom - options.margin)
+                bottom + options.margin - state.viewport.h
+            else
+                state.offset.y,
+        };
+        state.offset.y = std.math.clamp(requested, 0, @max(0, state.content.y - state.viewport.h));
+        state.following_messages = false;
+        return true;
+    }
+    return false;
 }
 
 pub fn table(b: L.Builder, headers: []const []const u8, rows: []const []const []const u8) !*L.Element {
@@ -633,6 +666,32 @@ test "popup and status semantics, message log, and optional table lines" {
     try std.testing.expectEqual(lined.children[0].bounds.y + lined.children[0].bounds.h, lined.children[1].bounds.y);
     try std.testing.expectEqual(lined.children[1].bounds.y + 1, lined.children[2].bounds.y);
     try std.testing.expectEqual(@as(f32, 12), lined.children[0].children[0].style.padding.left);
+}
+
+test "message scroller finds stable IDs and aligns without unintended follow" {
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = L.Builder{ .allocator = arena.allocator() };
+    var state = L.ScrollState{ .auto_scroll = true };
+    const first = try b.node(10, .{ .height = 80 }, .none, &.{});
+    const second = try b.node(11, .{ .height = 80 }, .none, &.{});
+    const third = try b.node(12, .{ .height = 80 }, .none, &.{});
+    const region = try messageScroller(b, .{ .x = 0, .y = 0, .w = 200, .h = 100 }, &state, &.{ first, second, third });
+    try std.testing.expectError(error.UnlaidOut, scrollToMessage(region, 11, .{}));
+    region.layout(.{ .x = 0, .y = 0, .w = 200, .h = 100 }, &font);
+    try std.testing.expectEqual(@as(f32, 140), state.offset.y);
+    try std.testing.expect(try scrollToMessage(region, 11, .{ .alignment = .start, .margin = 10 }));
+    try std.testing.expectEqual(@as(f32, 70), state.offset.y);
+    region.layout(.{ .x = 0, .y = 0, .w = 200, .h = 100 }, &font);
+    try std.testing.expectEqual(@as(f32, 70), state.offset.y);
+    try std.testing.expect(try scrollToMessage(region, 11, .{}));
+    try std.testing.expectEqual(@as(f32, 70), state.offset.y);
+    try std.testing.expect(try scrollToMessage(region, 12, .{ .alignment = .end }));
+    try std.testing.expectEqual(@as(f32, 140), state.offset.y);
+    try std.testing.expect(!try scrollToMessage(region, 19, .{}));
+    try std.testing.expectError(error.InvalidSize, scrollToMessage(region, 12, .{ .margin = -1 }));
 }
 
 test "input suffix and breadcrumb labels fit their painted bounds" {

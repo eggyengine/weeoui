@@ -101,7 +101,17 @@ behind it. Pass the current animation phase to `spinner`.
 navigation IDs `first_id + 32/33`, and time-adjustment IDs `first_id + 34..37`.
 `widgets.shiftMonth` clamps the selected day when changing months. Use
 `widgets.form` for field groups and `messageScroller` for scrollable messages
-with AccessKit region and live-log semantics.
+with AccessKit region and live-log semantics. A message scroller opens at
+the end by default; set `scroll.message_start = .start` before its first
+layout to open at the top. Set `scroll.auto_scroll = true` to follow new
+messages until the user scrolls up, and call `scroll.jumpToMessageEnd()`
+for a "Jump to latest" button. To preserve the reading position after
+prepending older rows, pass their measured height to
+`scroll.preserveMessagePrepend(height)` before the next layout. Give
+messages stable nonzero IDs and call
+`widgets.scrollToMessage(region, id, .{ .alignment = .start, .margin = 8 })`
+on a laid-out region to target one; relayout afterward to update the
+painted bounds. Missing IDs return `false`.
 For editable text, retain a `weeoui.TextEdit(128)` per field and pass its
 `text()`, `cursor`, and `selection()` into `weeoui.Input`. Pass SDL text events
 through `insert`, keyboard actions through `moveLeft`/`moveRight`/`undo`, and
