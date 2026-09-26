@@ -27,7 +27,8 @@ set `canvas.theme = weeoui.Theme.dark`. Supply your own TTF/OTF bytes to
 `Font.init` for typography and use `Canvas` primitives in custom painters.
 For icons, `b.icon(.search)` uses an atlas-backed Lucide glyph, and
 `canvas.icon(rect, .check, color)` lets custom painters choose its color and
-bounds. The five bundled SVGs (`search`, `check`, and the three chevrons) are
+bounds. The fourteen bundled SVGs (including search, chevrons, command,
+keyboard, image, clock, and calendar) are
 pinned to Lucide revision `66d8f9fc394b8530377e5f6112f0b8908ba01280`
 under `src/assets/lucide/`, alongside their license. Pre-rasterized masks
 are embedded at build time; applications do not need an SVG renderer.
@@ -75,21 +76,39 @@ if (mouse_pressed and tabs.hit(11, mouse_x, mouse_y)) selected_id = 11;
 | --- | --- |
 | Fields, labels, input groups, OTP, selects, comboboxes | `widgets.field`, `inputGroup`, `inputOtp`, `select`, `combobox`, `command` |
 | Radio/toggle/button groups, tabs, accordion, collapsible | `widgets.radioGroup`, `toggleGroup`, `buttonGroup`, `tabs`, `accordion`, `disclosure` |
-| Dropdown/context menus, popovers, hover cards, tooltips | `widgets.menu`, `popover`, `hoverCard`, `tooltip` |
+| Dropdown/context menus, popovers, hover cards, tooltips | `widgets.dropdownMenu`, `contextMenu`, `popoverAt`, `hoverCardAt`, `tooltipAt` |
 | Dialogs, alert dialogs, sheets, drawers, alerts, toasts | `widgets.modal`, `b.alert`, `widgets.toast` |
 | Calendar, date picker, tables, sortable headers, pagination, breadcrumbs | `widgets.calendar`, `datePicker`, `table`, `dataTable`, `pagination`, `breadcrumb` |
 | Carousel, scroll area, resizable panes, aspect ratio | `widgets.carousel`, `scrollArea`, `resizable`, `aspectRatio` |
 | Sidebar, empty states, messages, item rows, keyboard hints, attachments, charts | `widgets.sidebar`, `empty`, `message`, `item`, `kbd`, `attachment`, `b.chart` |
 
-The same `menu` can anchor a dropdown, context menu, or menubar; positioning
-and open state are application-owned. `table` handles visible rows; `dataTable`
-adds clickable header IDs while the app sorts, filters, and pages data.
+Pass an anchor element to `dropdownMenu`/`popoverAt`/`tooltipAt`, or a
+pointer position to `contextMenu`; pass `null` when the context menu is
+closed. Overlays flip upward when needed, stay within the viewport, do not
+increase page height, and paint after base UI in `z_index` order. If a host
+draws other content between UI layers, call `root.drawWithoutOverlays(canvas)`,
+draw that content, then `root.drawOverlays(canvas)`. Route hit tests in the
+same order and trap focus within a modal; Eggy's demo implements both.
+Open state and trigger dismissal belong to the application. `table` handles
+visible rows; `dataTableWithOptions(..., .{ .lines = true })` adds visible
+row separators, while `dataTable` retains the borderless default. Header IDs
+let the app sort, filter, and page data.
 `attachment` exposes a button ID for
 the app's native file picker. Modal overlays take the full viewport; render
 them after the underlying UI and route input to the modal instead of controls
 behind it. Pass the current animation phase to `spinner`.
-`calendar` and `datePicker` assign day IDs `first_id + day` (1-31). Use
-`widgets.form` for field groups and `messageScroller` for scrollable messages.
+`calendar` and `datePicker` assign day IDs `first_id + day` (1-31), month
+navigation IDs `first_id + 32/33`, and time-adjustment IDs `first_id + 34..37`.
+`widgets.shiftMonth` clamps the selected day when changing months. Use
+`widgets.form` for field groups and `messageScroller` for scrollable messages
+with AccessKit region and live-log semantics.
+For editable text, retain a `weeoui.TextEdit(128)` per field and pass its
+`text()`, `cursor`, and `selection()` into `weeoui.Input`. Pass SDL text events
+through `insert`, keyboard actions through `moveLeft`/`moveRight`/`undo`, and
+IME preedit through `Input.composition`; the editor validates UTF-8, bounds,
+and codepoint boundaries. `Input` handles focus, caret, selection, and
+composition painting. Use `b.animatedSkeleton(width, height, phase)` and
+`b.spinner(phase)` for time-driven loading feedback.
 UI strings
 currently render printable ASCII; non-ASCII text uses a fallback glyph until
 the font atlas supports dynamic Unicode. Browser-only integrations and

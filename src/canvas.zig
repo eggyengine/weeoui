@@ -40,6 +40,10 @@ pub const Canvas = struct {
     }
     pub fn roundRect(self: *Canvas, r: Rect, color: Color, radius: f32) !void {
         if (r.w <= 0 or r.h <= 0) return;
+        if (self.clip) |clip| {
+            const visible = r.intersection(clip);
+            if (visible.w <= 0 or visible.h <= 0) return;
+        }
         const corner = @max(0, @min(radius, @min(r.w, r.h) / 2));
         if (corner < 1) return self.rect(r, color);
         try self.rect(.{ .x = r.x, .y = r.y + corner, .w = r.w, .h = r.h - 2 * corner }, color);
@@ -90,6 +94,10 @@ pub const Canvas = struct {
     pub const TextAlign = enum { start, center, end };
     /// Align visible ink within a rectangle; all components share the same vertical center.
     pub fn textIn(self: *Canvas, r: Rect, value: []const u8, size: f32, color: Color, alignment: TextAlign) !void {
+        if (self.clip) |clip| {
+            const visible = r.intersection(clip);
+            if (visible.w <= 0 or visible.h <= 0) return;
+        }
         const ink = self.font.inkBounds(value, size);
         const center = r.center();
         const x = switch (alignment) {
@@ -103,6 +111,10 @@ pub const Canvas = struct {
         return self.textWrappedInAligned(r, value, size, color, .start);
     }
     pub fn textWrappedInAligned(self: *Canvas, r: Rect, value: []const u8, size: f32, color: Color, alignment: TextAlign) !void {
+        if (self.clip) |clip| {
+            const visible = r.intersection(clip);
+            if (visible.w <= 0 or visible.h <= 0) return;
+        }
         var iter = self.font.lines(value, size, r.w);
         var y = r.y;
         const line_height = size * 1.35;

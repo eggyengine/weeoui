@@ -5,7 +5,7 @@ const Rect = @import("types.zig").Rect;
 
 pub const atlas_width = 1024;
 pub const atlas_height = 1024;
-pub const Icon = enum { chevron_down, chevron_left, chevron_right, check, search };
+pub const Icon = enum { chevron_down, chevron_left, chevron_right, check, search, calendar, chevron_up, clock, command, image, info, keyboard, menu, x };
 const icon_size = 48;
 const icon_masks = [_][]const u8{
     @embedFile("assets/lucide/chevron-down.mask"),
@@ -13,6 +13,15 @@ const icon_masks = [_][]const u8{
     @embedFile("assets/lucide/chevron-right.mask"),
     @embedFile("assets/lucide/check.mask"),
     @embedFile("assets/lucide/search.mask"),
+    @embedFile("assets/lucide/calendar.mask"),
+    @embedFile("assets/lucide/chevron-up.mask"),
+    @embedFile("assets/lucide/clock.mask"),
+    @embedFile("assets/lucide/command.mask"),
+    @embedFile("assets/lucide/image.mask"),
+    @embedFile("assets/lucide/info.mask"),
+    @embedFile("assets/lucide/keyboard.mask"),
+    @embedFile("assets/lucide/menu.mask"),
+    @embedFile("assets/lucide/x.mask"),
 };
 
 pub const Glyph = struct {

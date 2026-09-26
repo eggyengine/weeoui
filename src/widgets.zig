@@ -6,8 +6,9 @@ const Rect = @import("types.zig").Rect;
 
 pub const Choice = struct { id: u32, label: []const u8 };
 pub const Section = struct { id: u32, title: []const u8, open: bool = false, content: []const *L.Element = &.{} };
-pub const Date = struct { year: u16, month: u8, day: u8 = 0 };
+pub const Date = struct { year: u16, month: u8, day: u8 = 0, hour: u8 = 0, minute: u8 = 0 };
 pub const Modal = enum { dialog, alert_dialog, sheet, drawer };
+pub const TableOptions = struct { lines: bool = false };
 
 pub fn field(b: L.Builder, id: u32, name: []const u8, opts: primitives.Input) !*L.Element {
     const input = try b.input(id, opts);
@@ -90,6 +91,7 @@ pub fn buttonGroup(b: L.Builder, choices: []const Choice) !*L.Element {
 }
 
 pub fn menu(b: L.Builder, choices: []const Choice, highlighted_id: u32) !*L.Element {
+    if (choices.len == 0) return b.node(0, .{ .width = 220, .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 } }, .{ .surface = .menu }, &.{try b.label("No results")});
     const children = try b.allocator.alloc(*L.Element, choices.len);
     defer b.allocator.free(children);
     for (choices, 0..) |choice, i| {
@@ -101,6 +103,22 @@ pub fn menu(b: L.Builder, choices: []const Choice, highlighted_id: u32) !*L.Elem
     return b.node(0, .{ .width = 220, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 }, .gap = 2 }, .{ .surface = .menu }, children);
 }
 
+pub fn dropdownMenu(b: L.Builder, anchor: *const L.Element, choices: []const Choice, highlighted_id: u32, open: bool) !?*L.Element {
+    if (!open) return null;
+    const popup = try menu(b, choices, highlighted_id);
+    popup.style.z_index = 100;
+    popup.overlay = .{ .anchor = .{ .target = anchor } };
+    return popup;
+}
+
+pub fn contextMenu(b: L.Builder, point: ?@import("types.zig").Vec2, choices: []const Choice, highlighted_id: u32) !?*L.Element {
+    const position = point orelse return null;
+    const popup = try menu(b, choices, highlighted_id);
+    popup.style.z_index = 200;
+    popup.overlay = .{ .point = position };
+    return popup;
+}
+
 pub fn combobox(b: L.Builder, id: u32, query: []const u8, choices: []const Choice, highlighted_id: u32, open: bool) !*L.Element {
     if (!open) {
         const input = try b.input(id, .{ .value = query, .placeholder = "Search..." });
@@ -109,10 +127,26 @@ pub fn combobox(b: L.Builder, id: u32, query: []const u8, choices: []const Choic
     }
     const input = try b.node(id, .{ .height = 40 }, .{ .input = .{ .value = query, .placeholder = "Search..." } }, &.{});
     input.accessibility.expanded = true;
+    const matching = try b.allocator.alloc(Choice, choices.len);
+    defer b.allocator.free(matching);
+    var count: usize = 0;
+    for (choices) |choice| {
+        if (!containsIgnoreCase(choice.label, query)) continue;
+        matching[count] = choice;
+        count += 1;
+    }
+    const popup = (try dropdownMenu(b, input, matching[0..count], highlighted_id, true)).?;
     return b.node(0, .{ .width = 220, .gap = 4 }, .none, &.{
         input,
-        try menu(b, choices, highlighted_id),
+        popup,
     });
+}
+fn containsIgnoreCase(value: []const u8, query: []const u8) bool {
+    if (query.len > value.len) return false;
+    for (0..value.len - query.len + 1) |i| {
+        if (std.ascii.eqlIgnoreCase(value[i..][0..query.len], query)) return true;
+    }
+    return false;
 }
 
 pub fn command(b: L.Builder, id: u32, query: []const u8, choices: []const Choice, highlighted_id: u32) !*L.Element {
@@ -193,13 +227,60 @@ pub fn popover(b: L.Builder, children: []const *L.Element) !*L.Element {
     return b.surface(.popover, children);
 }
 pub fn hoverCard(b: L.Builder, children: []const *L.Element) !*L.Element {
-    return popover(b, children);
+    return b.surface(.card, children);
+}
+pub fn popoverAt(b: L.Builder, anchor: *const L.Element, children: []const *L.Element) !*L.Element {
+    const panel = try popover(b, children);
+    panel.style.width = 220;
+    panel.style.z_index = 100;
+    panel.overlay = .{ .anchor = .{ .target = anchor } };
+    return panel;
+}
+pub fn hoverCardAt(b: L.Builder, anchor: *const L.Element, children: []const *L.Element) !*L.Element {
+    const panel = try hoverCard(b, children);
+    panel.style.width = 240;
+    panel.style.z_index = 100;
+    panel.overlay = .{ .anchor = .{ .target = anchor } };
+    return panel;
 }
 pub fn tooltip(b: L.Builder, text: []const u8) !*L.Element {
-    return b.node(0, .{ .width = @max(96, @as(f32, @floatFromInt(text.len)) * 9 + 24), .padding = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 } }, .{ .surface = .tooltip }, &.{try b.label(text)});
+    const result = try b.node(0, .{ .width = @max(96, @as(f32, @floatFromInt(text.len)) * 9 + 24), .padding = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 } }, .{ .surface = .tooltip }, &.{try b.label(text)});
+    result.accessibility.label = text;
+    return result;
+}
+pub fn tooltipAt(b: L.Builder, anchor: *const L.Element, text: []const u8) !*L.Element {
+    const panel = try tooltip(b, text);
+    panel.style.z_index = 200;
+    panel.overlay = .{ .anchor = .{ .target = anchor } };
+    return panel;
 }
 pub fn toast(b: L.Builder, title: []const u8, description: []const u8) !*L.Element {
-    return b.surface(.toast, &.{ try b.label(title), try b.node(0, .{}, .{ .text = .{ .value = description, .tone = .muted, .wrap = true } }, &.{}) });
+    return toastWithAction(b, title, description, null);
+}
+fn toastWithAction(b: L.Builder, title: []const u8, description: []const u8, action: ?*L.Element) !*L.Element {
+    const heading = try b.label(title);
+    const details = try b.node(0, .{}, .{ .text = .{ .value = description, .tone = .muted, .wrap = true } }, &.{});
+    const result = try b.surface(.toast, if (action) |button| &.{ heading, details, button } else &.{ heading, details });
+    result.accessibility.label = title;
+    result.accessibility.description = description;
+    result.accessibility.live = .polite;
+    return result;
+}
+pub fn toastAt(b: L.Builder, viewport: Rect, title: []const u8, description: []const u8) !*L.Element {
+    const panel = try toast(b, title, description);
+    try placeToast(panel, viewport);
+    return panel;
+}
+pub fn dismissibleToastAt(b: L.Builder, viewport: Rect, title: []const u8, description: []const u8, dismiss_id: u32) !*L.Element {
+    const panel = try toastWithAction(b, title, description, try b.button(dismiss_id, "Dismiss"));
+    try placeToast(panel, viewport);
+    return panel;
+}
+fn placeToast(panel: *L.Element, viewport: Rect) !void {
+    if (!std.math.isFinite(viewport.w) or !std.math.isFinite(viewport.h) or viewport.w <= 0 or viewport.h <= 0) return error.InvalidSize;
+    panel.style.width = @max(1, @min(320, viewport.w - 16));
+    panel.style.z_index = 500;
+    panel.overlay = .{ .point = .init(viewport.x + viewport.w - panel.style.width.? - 8, viewport.y + 8) };
 }
 pub fn empty(b: L.Builder, title: []const u8, description: []const u8, action: ?*L.Element) !*L.Element {
     const heading = try b.label(title);
@@ -221,11 +302,18 @@ pub fn attachment(b: L.Builder, id: u32, filename: []const u8) !*L.Element {
 }
 
 pub fn kbd(b: L.Builder, shortcut: []const u8) !*L.Element {
-    return b.node(0, .{
-        .width = @max(28, @as(f32, @floatFromInt(shortcut.len)) * 9 + 16),
+    const mac = @import("builtin").os.tag == .macos;
+    const label_text = if (mac and std.mem.startsWith(u8, shortcut, "Ctrl+")) shortcut[5..] else shortcut;
+    const result = try b.node(0, .{
+        .width = @max(48, @as(f32, @floatFromInt(label_text.len)) * 9 + 48),
         .height = 28,
         .padding = .{ .left = 8, .right = 8 },
-    }, .{ .surface = .tooltip }, &.{try b.node(0, .{}, .{ .text = .{ .value = shortcut, .size = 14 } }, &.{})});
+        .direction = .row,
+        .align_items = .center,
+        .gap = 4,
+    }, .{ .surface = .tooltip }, &.{ try b.icon(if (mac) .command else .keyboard), try b.node(0, .{}, .{ .text = .{ .value = label_text, .size = 14 } }, &.{}) });
+    result.accessibility = .{ .role = .group, .label = shortcut };
+    return result;
 }
 
 pub fn item(b: L.Builder, id: u32, title: []const u8, description: []const u8, leading: ?*L.Element) !*L.Element {
@@ -241,24 +329,37 @@ pub fn form(b: L.Builder, fields: []const *L.Element) !*L.Element {
 }
 
 pub fn messageScroller(b: L.Builder, viewport: Rect, state: *L.ScrollState, messages: []const *L.Element) !*L.Element {
-    return scrollArea(b, viewport, state, messages);
+    const log = try b.node(0, .{}, .none, messages);
+    log.accessibility = .{ .role = .log, .live = .polite };
+    const region = try scrollArea(b, viewport, state, &.{log});
+    region.accessibility = .{ .role = .region, .label = "Messages" };
+    return region;
 }
 
 pub fn table(b: L.Builder, headers: []const []const u8, rows: []const []const []const u8) !*L.Element {
+    return tableWithOptions(b, headers, rows, .{});
+}
+
+pub fn tableWithOptions(b: L.Builder, headers: []const []const u8, rows: []const []const []const u8, options: TableOptions) !*L.Element {
     if (headers.len == 0) return error.InvalidTable;
-    const children = try b.allocator.alloc(*L.Element, rows.len + 1);
+    const children = try b.allocator.alloc(*L.Element, rows.len + 1 + if (options.lines) rows.len else @as(usize, 0));
     defer b.allocator.free(children);
     children[0] = try tableRow(b, headers, true);
     for (rows, 0..) |row, i| {
         if (row.len != headers.len) return error.InvalidTable;
-        children[i + 1] = try tableRow(b, row, false);
+        if (options.lines) children[2 * i + 1] = try b.node(0, .{ .height = 1 }, .separator, &.{});
+        children[(if (options.lines) 2 else @as(usize, 1)) * (i + 1)] = try tableRow(b, row, false);
     }
-    const result = try b.node(0, .{ .gap = 1 }, .{ .surface = .card }, children);
+    const result = try b.node(0, .{}, .{ .surface = .card }, children);
     result.accessibility.role = .table;
     return result;
 }
 
 pub fn dataTable(b: L.Builder, headers: []const Choice, rows: []const []const []const u8) !*L.Element {
+    return dataTableWithOptions(b, headers, rows, .{});
+}
+
+pub fn dataTableWithOptions(b: L.Builder, headers: []const Choice, rows: []const []const []const u8, options: TableOptions) !*L.Element {
     if (headers.len == 0) return error.InvalidTable;
     const labels = try b.allocator.alloc([]const u8, headers.len);
     defer b.allocator.free(labels);
@@ -266,7 +367,7 @@ pub fn dataTable(b: L.Builder, headers: []const Choice, rows: []const []const []
         if (header.id == 0) return error.InvalidId;
         labels[i] = header.label;
     }
-    const result = try table(b, labels, rows);
+    const result = try tableWithOptions(b, labels, rows, options);
     for (headers, 0..) |header, i| {
         result.children[0].children[i].id = header.id;
     }
@@ -277,7 +378,7 @@ fn tableRow(b: L.Builder, values: []const []const u8, heading: bool) !*L.Element
     const cells = try b.allocator.alloc(*L.Element, values.len);
     defer b.allocator.free(cells);
     for (values, 0..) |value, i| {
-        cells[i] = try b.node(0, .{ .min_width = 96, .grow = 1, .height = 36, .padding = .{ .left = 8, .right = 8 } }, .{
+        cells[i] = try b.node(0, .{ .min_width = 96, .grow = 1, .height = 36, .padding = .{ .left = 12, .right = 12 } }, .{
             .text = .{ .value = value, .tone = if (heading) .muted else .foreground },
         }, &.{});
         cells[i].accessibility.role = if (heading) .column_header else .cell;
@@ -308,7 +409,7 @@ pub fn breadcrumb(b: L.Builder, choices: []const Choice) !*L.Element {
     const children = try b.allocator.alloc(*L.Element, choices.len * 2 - 1);
     defer b.allocator.free(children);
     for (choices, 0..) |choice, i| {
-        if (i > 0) children[i * 2 - 1] = try b.node(0, .{ .width = 12 }, .{ .text = .{ .value = ">", .tone = .muted } }, &.{});
+        if (i > 0) children[i * 2 - 1] = try b.icon(.chevron_right);
         children[i * 2] = try b.node(choice.id, .{ .width = @max(24, @as(f32, @floatFromInt(choice.label.len)) * 12) }, .{
             .text = .{ .value = choice.label, .tone = if (i + 1 == choices.len) .foreground else .muted },
         }, &.{});
@@ -322,7 +423,7 @@ pub fn pagination(b: L.Builder, first_id: u32, current: u16, total: u16) !*L.Ele
     var pages: [7]*L.Element = undefined;
     var count: usize = 0;
     if (current > 1) {
-        pages[count] = try pageButton(b, first_id, "<", false);
+        pages[count] = try iconButton(b, first_id, .chevron_left, "Previous page");
         count += 1;
     }
     const start = @max(1, @as(u32, current) -| 2);
@@ -333,7 +434,7 @@ pub fn pagination(b: L.Builder, first_id: u32, current: u16, total: u16) !*L.Ele
         count += 1;
     }
     if (current < total) {
-        pages[count] = try pageButton(b, first_id + @as(u32, total) + 1, ">", false);
+        pages[count] = try iconButton(b, first_id + @as(u32, total) + 1, .chevron_right, "Next page");
         count += 1;
     }
     return b.node(0, .{ .direction = .row, .gap = 4 }, .none, pages[0..count]);
@@ -344,17 +445,30 @@ fn pageButton(b: L.Builder, id: u32, text: []const u8, active: bool) !*L.Element
 }
 
 pub fn calendar(b: L.Builder, first_id: u32, date: Date) !*L.Element {
+    return calendarWithWidth(b, first_id, date, 300);
+}
+pub fn calendarWithWidth(b: L.Builder, first_id: u32, date: Date, width: f32) !*L.Element {
+    if (!std.math.isFinite(width) or width < 192) return error.InvalidSize;
     const days = try daysInMonth(date);
-    if (first_id > std.math.maxInt(u32) - 31) return error.InvalidDate;
+    if (first_id > std.math.maxInt(u32) - 37) return error.InvalidDate;
     const first = firstWeekday(date.year, date.month);
     const weeks: usize = (@as(usize, first) + days + 6) / 7;
-    const children = try b.allocator.alloc(*L.Element, weeks + 2);
+    const children = try b.allocator.alloc(*L.Element, weeks + 3);
     defer b.allocator.free(children);
     const heading = try std.fmt.allocPrint(b.allocator, "{d:0>4}-{d:0>2}", .{ date.year, date.month });
-    children[0] = try b.node(0, .{ .height = 32 }, .{ .text = .{ .value = heading } }, &.{});
+    const previous = try iconButton(b, first_id + 32, .chevron_left, "Previous month");
+    const next_month = try iconButton(b, first_id + 33, .chevron_right, "Next month");
+    previous.accessibility.disabled = date.year == 1 and date.month == 1;
+    next_month.accessibility.disabled = date.year == 9999 and date.month == 12;
+    children[0] = try b.node(0, .{ .height = 36, .direction = .row, .align_items = .center }, .none, &.{
+        previous,
+        try b.node(0, .{ .width = width - 24 - 72, .height = 28 }, .{ .text = .{ .value = heading, .alignment = .center } }, &.{}),
+        next_month,
+    });
     const weekdays = [_][]const u8{ "Mo", "Tu", "We", "Th", "Fr", "Sa", "Su" };
+    const day_width = (width - 24 - 6 * 4) / 7;
     var headings: [7]*L.Element = undefined;
-    for (weekdays, 0..) |name, i| headings[i] = try b.node(0, .{ .width = 36, .height = 24 }, .{ .text = .{ .value = name, .size = 12, .tone = .muted } }, &.{});
+    for (weekdays, 0..) |name, i| headings[i] = try b.node(0, .{ .width = day_width, .height = 24 }, .{ .text = .{ .value = name, .size = 12, .tone = .muted, .alignment = .center } }, &.{});
     children[1] = try b.node(0, .{ .direction = .row, .gap = 4 }, .none, &headings);
     var day: u8 = 1;
     for (0..weeks) |week| {
@@ -362,16 +476,32 @@ pub fn calendar(b: L.Builder, first_id: u32, date: Date) !*L.Element {
         for (&columns, 0..) |*slot, column| {
             const index = week * 7 + column;
             if (index < first or day > days) {
-                slot.* = try b.node(0, .{ .width = 36, .height = 36 }, .none, &.{});
+                slot.* = try b.node(0, .{ .width = day_width, .height = 36 }, .none, &.{});
             } else {
                 const label_text = try std.fmt.allocPrint(b.allocator, "{d}", .{day});
                 slot.* = try pageButton(b, first_id + day, label_text, day == date.day);
+                slot.*.style.width = day_width;
                 day += 1;
             }
         }
         children[week + 2] = try b.node(0, .{ .direction = .row, .gap = 4 }, .none, &columns);
     }
-    return b.node(0, .{ .width = 276, .gap = 4 }, .{ .surface = .popover }, children);
+    const clock = try std.fmt.allocPrint(b.allocator, "{d:0>2}:{d:0>2}", .{ date.hour, date.minute });
+    children[weeks + 2] = try b.node(0, .{ .direction = .row, .gap = 4, .align_items = .center }, .none, &.{
+        try compactIconButton(b, first_id + 34, .chevron_left, "Earlier hour"),
+        try compactIconButton(b, first_id + 36, .chevron_left, "Earlier minute"),
+        try b.node(0, .{ .width = width - 24 - 4 * 24 - 4 * 4, .height = 32 }, .{ .text = .{ .value = clock, .alignment = .center } }, &.{}),
+        try compactIconButton(b, first_id + 37, .chevron_right, "Later minute"),
+        try compactIconButton(b, first_id + 35, .chevron_right, "Later hour"),
+    });
+    return b.node(0, .{ .width = width, .padding = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 }, .gap = 4 }, .{ .surface = .popover }, children);
+}
+fn compactIconButton(b: L.Builder, id: u32, icon: @import("font.zig").Icon, name: []const u8) !*L.Element {
+    const result = try iconButton(b, id, icon, name);
+    result.style = .{ .width = 24, .height = 28, .padding = .{ .left = 2, .top = 4 } };
+    result.children[0].style.width = 20;
+    result.children[0].style.height = 20;
+    return result;
 }
 
 fn firstWeekday(year: u16, month: u8) u8 {
@@ -382,20 +512,50 @@ fn firstWeekday(year: u16, month: u8) u8 {
 }
 
 fn daysInMonth(date: Date) !u8 {
-    if (date.year == 0 or date.month < 1 or date.month > 12) return error.InvalidDate;
+    if (date.year == 0 or date.year > 9999 or date.month < 1 or date.month > 12 or date.hour > 23 or date.minute > 59) return error.InvalidDate;
     const days: u8 = @intCast(std.time.epoch.getDaysInMonth(date.year, @enumFromInt(date.month)));
     if (date.day > days) return error.InvalidDate;
     return days;
 }
+pub fn shiftMonth(date: Date, direction: enum { previous, next }) !Date {
+    _ = try daysInMonth(date);
+    var changed = date;
+    switch (direction) {
+        .previous => {
+            if (date.year == 1 and date.month == 1) return error.InvalidDate;
+            if (date.month == 1) {
+                changed.year -= 1;
+                changed.month = 12;
+            } else changed.month -= 1;
+        },
+        .next => {
+            if (date.year == 9999 and date.month == 12) return error.InvalidDate;
+            if (date.month == 12) {
+                changed.year += 1;
+                changed.month = 1;
+            } else changed.month += 1;
+        },
+    }
+    changed.day = @min(date.day, try daysInMonth(.{ .year = changed.year, .month = changed.month }));
+    return changed;
+}
 
 pub fn datePicker(b: L.Builder, id: u32, first_day_id: u32, date: Date, open: bool) !*L.Element {
+    return datePickerWithWidth(b, id, first_day_id, date, open, 300);
+}
+pub fn datePickerWithWidth(b: L.Builder, id: u32, first_day_id: u32, date: Date, open: bool, width: f32) !*L.Element {
     _ = try daysInMonth(date);
-    const label_text = if (date.day == 0) "" else try std.fmt.allocPrint(b.allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ date.year, date.month, date.day });
+    if (!std.math.isFinite(width) or width < 192) return error.InvalidSize;
+    const label_text = if (date.day == 0) "" else try std.fmt.allocPrint(b.allocator, "{d:0>4}-{d:0>2}-{d:0>2}  {d:0>2}:{d:0>2}", .{ date.year, date.month, date.day, date.hour, date.minute });
     const input = try b.input(id, .{ .value = label_text, .placeholder = "Pick a date" });
+    input.style.width = width;
     input.accessibility.role = .button;
     input.accessibility.expanded = open;
     if (!open) return input;
-    return b.node(0, .{ .width = 276, .gap = 4 }, .none, &.{ input, try calendar(b, first_day_id, date) });
+    const popup = try calendarWithWidth(b, first_day_id, date, width);
+    popup.style.z_index = 100;
+    popup.overlay = .{ .anchor = .{ .target = input } };
+    return b.node(0, .{ .width = width }, .none, &.{ input, popup });
 }
 
 test "calendar lays out leap days and rejects invalid dates" {
@@ -405,14 +565,74 @@ test "calendar lays out leap days and rejects invalid dates" {
     defer arena.deinit();
     const b = L.Builder{ .allocator = arena.allocator() };
     const calendar_root = try calendar(b, 100, .{ .year = 2024, .month = 2, .day = 29 });
-    calendar_root.layout(.{ .x = 0, .y = 0, .w = 276, .h = 300 }, &font);
+    calendar_root.layout(.{ .x = 0, .y = 0, .w = 300, .h = 360 }, &font);
     const leap_day = calendar_root.find(129).?;
     try std.testing.expect(calendar_root.hit(129, leap_day.bounds.center().x, leap_day.bounds.center().y));
+    try std.testing.expect(leap_day.bounds.x + leap_day.bounds.w <= calendar_root.bounds.x + calendar_root.bounds.w - 12);
+    try std.testing.expect(calendar_root.find(132) != null);
+    try std.testing.expect(calendar_root.find(137) != null);
+    const january = try shiftMonth(.{ .year = 2024, .month = 12, .day = 31 }, .next);
+    try std.testing.expectEqual(@as(u16, 2025), january.year);
+    try std.testing.expectEqual(@as(u8, 1), january.month);
+    const february = try shiftMonth(.{ .year = 2025, .month = 3, .day = 31 }, .previous);
+    try std.testing.expectEqual(@as(u8, 28), february.day);
+    try std.testing.expectError(error.InvalidDate, shiftMonth(.{ .year = 1, .month = 1 }, .previous));
+    const compact = try calendarWithWidth(b, 200, .{ .year = 2024, .month = 2 }, 192);
+    compact.layout(.{ .x = 0, .y = 0, .w = 192, .h = 360 }, &font);
+    try std.testing.expect(compact.find(229).?.bounds.x + compact.find(229).?.bounds.w <= compact.bounds.x + compact.bounds.w - 12);
+    try std.testing.expect(compact.find(235).?.bounds.x + compact.find(235).?.bounds.w <= compact.bounds.x + compact.bounds.w - 12);
+    try std.testing.expectError(error.InvalidSize, calendarWithWidth(b, 200, .{ .year = 2024, .month = 2 }, 180));
     try std.testing.expectEqual(@as(u8, 3), firstWeekday(2024, 2));
     try std.testing.expectEqual(@as(u8, 1), firstWeekday(2026, 9));
     try std.testing.expectError(error.InvalidDate, calendar(b, 100, .{ .year = 2025, .month = 2, .day = 29 }));
     try std.testing.expectError(error.InvalidDate, calendar(b, 100, .{ .year = 2025, .month = 13 }));
     try std.testing.expectError(error.InvalidDate, datePicker(b, 9, 100, .{ .year = 2025, .month = 13 }, false));
+}
+
+test "popup and status semantics, message log, and optional table lines" {
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = L.Builder{ .allocator = arena.allocator() };
+    const anchor = try b.button(1, "Menu");
+    const popup = (try dropdownMenu(b, anchor, &.{.{ .id = 2, .label = "Open" }}, 2, true)).?;
+    const toast_panel = try dismissibleToastAt(b, .{ .x = 0, .y = 0, .w = 440, .h = 340 }, "Saved", "Done.", 3);
+    var scroll: L.ScrollState = .{};
+    const messages = try messageScroller(b, .{ .x = 0, .y = 0, .w = 240, .h = 100 }, &scroll, &.{try message(b, "A", "Hello")});
+    const root = try b.node(0, .{ .height = 340 }, .none, &.{ anchor, popup, toast_panel, messages });
+    root.layout(.{ .x = 0, .y = 0, .w = 440, .h = 340 }, &font);
+    const snapshot = try @import("accessibility.zig").collect(arena.allocator(), root, 2);
+    var menu_found = false;
+    var status_found = false;
+    var region_found = false;
+    var log_found = false;
+    for (snapshot.nodes) |node| switch (node.role) {
+        .menu => menu_found = true,
+        .status => {
+            status_found = true;
+            try std.testing.expectEqualStrings("Saved", node.label);
+        },
+        .region => {
+            region_found = true;
+            try std.testing.expectEqualStrings("Messages", node.label);
+        },
+        .log => {
+            log_found = true;
+            try std.testing.expectEqual(@as(@FieldType(@import("accessibility.zig").Node, "live"), .polite), node.live);
+        },
+        else => {},
+    };
+    try std.testing.expect(menu_found and status_found and region_found and log_found);
+    try std.testing.expect(popup.bounds.y >= anchor.bounds.y + anchor.bounds.h);
+    const plain = try tableWithOptions(b, &.{"Header"}, &.{&.{"Value"}}, .{});
+    plain.layout(.{ .x = 0, .y = 0, .w = 200, .h = 80 }, &font);
+    const lined = try tableWithOptions(b, &.{"Header"}, &.{&.{"Value"}}, .{ .lines = true });
+    lined.layout(.{ .x = 0, .y = 0, .w = 200, .h = 80 }, &font);
+    try std.testing.expectEqual(plain.children[0].bounds.y + plain.children[0].bounds.h, plain.children[1].bounds.y);
+    try std.testing.expectEqual(lined.children[0].bounds.y + lined.children[0].bounds.h, lined.children[1].bounds.y);
+    try std.testing.expectEqual(lined.children[1].bounds.y + 1, lined.children[2].bounds.y);
+    try std.testing.expectEqual(@as(f32, 12), lined.children[0].children[0].style.padding.left);
 }
 
 test "input suffix and breadcrumb labels fit their painted bounds" {

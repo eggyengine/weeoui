@@ -4,6 +4,7 @@ const L = @import("layout.zig");
 const Rect = @import("types.zig").Rect;
 
 pub const Role = L.Accessibility.Role;
+pub const TextSelection = struct { anchor: usize, focus: usize };
 pub const Node = struct {
     id: u64,
     role: Role,
@@ -11,15 +12,19 @@ pub const Node = struct {
     children: []u64,
     label: []const u8 = "",
     description: []const u8 = "",
+    described_by: ?u32 = null,
+    controls: ?u32 = null,
     value: []const u8 = "",
     numeric_value: ?f32 = null,
     toggled: ?bool = null,
     selected: ?bool = null,
     expanded: ?bool = null,
     modal: bool = false,
+    live: @FieldType(L.Accessibility, "live") = .off,
     disabled: bool = false,
     invalid: bool = false,
     multiline: bool = false,
+    text_selection: ?TextSelection = null,
     actionable: bool = false,
 };
 pub const Snapshot = struct {
@@ -60,20 +65,32 @@ fn append(allocator: std.mem.Allocator, nodes: *std.ArrayList(Node), ids: *std.A
     var node = &nodes.items[index];
     node.label = try allocator.dupe(u8, element.accessibility.label orelse labelFor(element.paint_kind));
     node.description = try allocator.dupe(u8, element.accessibility.description orelse "");
+    node.described_by = element.accessibility.described_by;
+    node.controls = element.accessibility.controls;
     if (element.accessibility.numeric_value) |value| {
         if (!std.math.isFinite(value)) return error.InvalidValue;
         node.numeric_value = value;
     }
     node.expanded = element.accessibility.expanded;
     node.modal = element.accessibility.modal;
+    node.live = element.accessibility.live;
     node.disabled = element.accessibility.disabled;
     node.actionable = !is_root and element.actionable();
     switch (element.paint_kind) {
         .input => |input| {
+            if (!std.unicode.utf8ValidateSlice(input.value)) return error.InvalidUtf8;
             node.value = try allocator.dupe(u8, input.value);
             node.disabled = node.disabled or input.disabled;
             node.invalid = input.invalid;
             node.multiline = input.multiline;
+            if (input.cursor) |cursor| {
+                if (!@import("text_edit.zig").isBoundary(input.value, cursor)) return error.InvalidBoundary;
+                const range = input.selection;
+                if (range) |selection| {
+                    if (selection.start > selection.end or !@import("text_edit.zig").isBoundary(input.value, selection.start) or !@import("text_edit.zig").isBoundary(input.value, selection.end)) return error.InvalidRange;
+                }
+                node.text_selection = .{ .anchor = if (range) |selection| if (cursor == selection.start) selection.end else selection.start else cursor, .focus = cursor };
+            }
             if (node.label.len == 0) node.label = try allocator.dupe(u8, input.placeholder);
         },
         .checkbox => |value| node.toggled = value.checked,
@@ -117,6 +134,8 @@ fn roleFor(paint: L.Paint) Role {
         .surface => |surface| switch (surface) {
             .menu => .menu,
             .dialog => .dialog,
+            .tooltip => .tooltip,
+            .toast => .status,
             else => .group,
         },
         .separator, .scrollbar, .skeleton, .spinner, .icon => .ignored,

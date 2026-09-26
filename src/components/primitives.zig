@@ -1,6 +1,7 @@
 const std = @import("std");
 const Canvas = @import("../canvas.zig").Canvas;
 const Font = @import("../font.zig").Font;
+const text_edit = @import("../text_edit.zig");
 const types = @import("../types.zig");
 const Color = types.Color;
 const Rect = types.Rect;
@@ -34,12 +35,26 @@ fn wrappedTextIn(c: *Canvas, r: Rect, value: []const u8, size: f32, color: Color
 }
 
 pub const Input = struct {
+    pub const Composition = struct {
+        text: []const u8,
+        /// Committed-value byte range to replace temporarily; defaults to the
+        /// selection, then the caret. `cursor` is a byte offset within `text`.
+        range: ?text_edit.Range = null,
+        cursor: ?usize = null,
+    };
+
     value: []const u8 = "",
     placeholder: []const u8 = "",
     focused: bool = false,
+    caret_visible: bool = true,
     disabled: bool = false,
     invalid: bool = false,
     multiline: bool = false,
+    cursor: ?usize = null,
+    selection: ?text_edit.Range = null,
+    composition: ?Composition = null,
+    scroll_x: f32 = 0,
+    scroll_y: f32 = 0,
 };
 
 pub fn drawInput(c: *Canvas, r: Rect, opts: Input) !void {
@@ -49,13 +64,105 @@ pub fn drawInput(c: *Canvas, r: Rect, opts: Input) !void {
     if (opts.focused and !opts.disabled) try focusRing(c, r, radius, if (opts.invalid) c.theme.destructive else c.theme.ring);
     try c.roundRect(r, border, radius);
     try c.roundRect(r.inset(1), if (opts.disabled) c.theme.muted else c.theme.background, @max(0, radius - 1));
-    const area = Rect{ .x = r.x + 10, .y = r.y + 4, .w = @max(0, r.w - 20), .h = @max(0, r.h - 8) };
+    const area = text_edit.inputContentRect(r);
     const content = if (opts.value.len == 0) opts.placeholder else opts.value;
     const color = if (opts.disabled or opts.value.len == 0) c.theme.muted_foreground else c.theme.foreground;
-    if (opts.multiline) {
+    if (opts.focused and !opts.disabled and (opts.cursor != null or opts.selection != null or opts.composition != null)) {
+        try paintEditingFeedback(c, area, opts);
+    } else if (opts.multiline) {
         try wrappedTextIn(c, area, content, c.theme.text_size, color);
     } else {
         try textIn(c, area, content, c.theme.text_size, color, .start);
+    }
+}
+
+fn checkedRange(value: []const u8, range: text_edit.Range) !void {
+    if (range.start > range.end or range.end > value.len) return error.InvalidRange;
+    if (!text_edit.isBoundary(value, range.start) or !text_edit.isBoundary(value, range.end)) return error.InvalidBoundary;
+}
+
+fn paintEditingFeedback(c: *Canvas, area: Rect, opts: Input) !void {
+    if (area.w <= 0 or area.h <= 0 or c.theme.text_size <= 0) return;
+    if (!std.unicode.utf8ValidateSlice(opts.value)) return error.InvalidUtf8;
+    if (opts.selection) |range| try checkedRange(opts.value, range);
+    const cursor = opts.cursor orelse opts.value.len;
+    if (!text_edit.isBoundary(opts.value, cursor)) return error.InvalidBoundary;
+
+    var view = text_edit.TextView{ .before = opts.value };
+    var caret = cursor;
+    var marked: ?text_edit.Range = null;
+    if (opts.composition) |composition| {
+        if (!std.unicode.utf8ValidateSlice(composition.text)) return error.InvalidUtf8;
+        const range = composition.range orelse opts.selection orelse text_edit.Range{ .start = cursor, .end = cursor };
+        try checkedRange(opts.value, range);
+        const preedit_cursor = composition.cursor orelse composition.text.len;
+        if (!text_edit.isBoundary(composition.text, preedit_cursor)) return error.InvalidBoundary;
+        view = .{
+            .before = opts.value[0..range.start],
+            .inserted = composition.text,
+            .after = opts.value[range.end..],
+        };
+        marked = .{ .start = range.start, .end = range.start + composition.text.len };
+        caret = range.start + preedit_cursor;
+    }
+    const layout = text_edit.TextLayout{
+        .font = c.font,
+        .size = c.theme.text_size,
+        .area = area,
+        .multiline = opts.multiline,
+        .scroll_x = opts.scroll_x,
+        .scroll_y = opts.scroll_y,
+    };
+    const previous = c.clip;
+    c.clip = if (previous) |clip| clip.intersection(area) else area;
+    defer c.clip = previous;
+
+    if (opts.value.len == 0 and opts.composition == null and opts.placeholder.len > 0) {
+        if (opts.multiline) {
+            try wrappedTextIn(c, area, opts.placeholder, c.theme.text_size, c.theme.muted_foreground);
+        } else {
+            try textIn(c, area, opts.placeholder, c.theme.text_size, c.theme.muted_foreground, .start);
+        }
+    }
+    var lines = layout.lines(view);
+    while (lines.next()) |line| {
+        if (line.y + line.h <= area.y or line.y >= area.y + area.h) continue;
+        if (opts.composition == null) if (opts.selection) |range| {
+            try paintInputSpan(c, layout, view, line, range, false);
+        };
+        const y = layout.lineTextY(view, line);
+        var x = layout.lineOrigin(view, line);
+        var at = line.start;
+        while (at < line.end) {
+            const cp = view.codepoint(at);
+            try c.text(x, y, cp.bytes, layout.size, c.theme.foreground);
+            x += c.font.measure(cp.bytes, layout.size);
+            at = cp.end;
+        }
+        if (marked) |range| try paintInputSpan(c, layout, view, line, range, true);
+    }
+    const caret_rect = layout.caretRect(view, caret);
+    if (opts.caret_visible) try c.rect(caret_rect, c.theme.foreground);
+}
+
+fn paintInputSpan(c: *Canvas, layout: text_edit.TextLayout, view: text_edit.TextView, line: text_edit.TextLayout.Line, range: text_edit.Range, underline: bool) !void {
+    if (range.start >= range.end) return;
+    const start = @max(range.start, line.start);
+    const end = @min(range.end, line.end);
+    const newline = line.newline and range.start <= line.end and range.end > line.end;
+    if (start >= end and !newline) return;
+    const x = layout.penX(view, line, @min(start, line.end));
+    const width = if (start < end) view.measure(c.font, layout.size, start, end) else 0;
+    const highlight = Rect{
+        .x = x,
+        .y = line.y + @max(0, (line.h - layout.size * 1.35) / 2),
+        .w = width + if (newline) @max(2, c.font.measure(" ", layout.size) / 2) else @as(f32, 0),
+        .h = @min(line.h, layout.size * 1.35),
+    };
+    if (underline) {
+        try c.rect(.{ .x = highlight.x, .y = highlight.y + highlight.h - 2, .w = highlight.w, .h = 1 }, c.theme.foreground);
+    } else {
+        try c.rectAlpha(highlight, c.theme.ring, 0.4);
     }
 }
 
@@ -91,6 +198,15 @@ pub fn drawProgress(c: *Canvas, r: Rect, value: f32) !void {
 
 pub fn drawSkeleton(c: *Canvas, r: Rect) !void {
     try c.roundRect(r, c.theme.muted, c.theme.radiusMd());
+}
+pub fn drawAnimatedSkeleton(c: *Canvas, r: Rect, phase: f32) !void {
+    if (!std.math.isFinite(phase)) return error.InvalidValue;
+    const blend = 0.12 + 0.24 * (0.5 + 0.5 * @sin(phase * 2 * std.math.pi));
+    var color: Color = undefined;
+    for (&color, c.theme.muted, c.theme.background) |*channel, muted, background| {
+        channel.* = muted * (1 - blend) + background * blend;
+    }
+    try c.roundRect(r, color, c.theme.radiusMd());
 }
 
 /// Phase is supplied by the caller, normalized to 0..1.
@@ -235,6 +351,91 @@ test "input clips long text to its bounds and restores the caller clip" {
         try std.testing.expect(vertex.position[0] >= 20 and vertex.position[0] <= 60);
         try std.testing.expect(vertex.position[1] >= r.y and vertex.position[1] <= r.y + r.h);
     }
+}
+
+test "focused input paints selection before glyphs and a clipped caret after them" {
+    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var vertices: [2048]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    const r = Rect{ .x = 10, .y = 20, .w = 100, .h = 34 };
+    const opts = Input{ .value = "AéB", .focused = true, .cursor = 3, .selection = .{ .start = 1, .end = 3 } };
+    canvas.clip = .{ .x = 24, .y = 0, .w = 60, .h = 100 };
+    const previous = canvas.clip;
+    try drawInput(&canvas, r, opts);
+    try std.testing.expectEqualDeep(previous, canvas.clip);
+    const area = text_edit.inputContentRect(r).intersection(previous.?);
+    var highlighted = false;
+    for (canvas.items()) |vertex| {
+        try std.testing.expect(vertex.position[0] >= previous.?.x and vertex.position[0] <= previous.?.x + previous.?.w);
+        try std.testing.expect(vertex.position[1] >= previous.?.y and vertex.position[1] <= previous.?.y + previous.?.h);
+        if (vertex.color[3] == 0.4) {
+            highlighted = true;
+            try std.testing.expect(vertex.position[0] >= area.x and vertex.position[0] <= area.x + area.w);
+            try std.testing.expect(vertex.position[1] >= area.y and vertex.position[1] <= area.y + area.h);
+        }
+    }
+    try std.testing.expect(highlighted);
+    for (canvas.items()[canvas.len - 6 ..]) |vertex| {
+        try std.testing.expectEqualDeep([4]f32{ canvas.theme.foreground[0], canvas.theme.foreground[1], canvas.theme.foreground[2], 1 }, vertex.color);
+        try std.testing.expect(vertex.position[0] >= area.x and vertex.position[0] <= area.x + area.w);
+        try std.testing.expect(vertex.position[1] >= area.y and vertex.position[1] <= area.y + area.h);
+    }
+    const focused_len = canvas.len;
+    canvas.len = 0;
+    try drawInput(&canvas, r, .{ .value = opts.value, .cursor = opts.cursor });
+    try std.testing.expect(focused_len > canvas.len);
+    for (canvas.items()) |vertex| try std.testing.expect(vertex.color[3] != 0.4);
+}
+
+test "multiline input paints underlined preedit, empty-line caret, and clipped selection" {
+    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var vertices: [4096]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    const r = Rect{ .x = 0, .y = 0, .w = 90, .h = 55 };
+    const area = text_edit.inputContentRect(r);
+    canvas.clip = r;
+    try drawInput(&canvas, r, .{ .value = "ab\n", .multiline = true, .focused = true, .cursor = 3, .composition = .{ .text = "xy\nz", .cursor = 3 } });
+    const caret_y = canvas.items()[canvas.len - 1].position[1];
+    try std.testing.expect(caret_y >= area.y + canvas.theme.text_size * 2 * 1.35);
+    var underlined = false;
+    for (canvas.items()) |vertex| {
+        if (vertex.position[1] > area.y + canvas.theme.text_size * 1.35 and vertex.position[1] < area.y + canvas.theme.text_size * 2 * 1.35 and vertex.color[0] == canvas.theme.foreground[0]) underlined = true;
+        try std.testing.expect(vertex.position[0] >= 0 and vertex.position[0] <= r.w);
+        try std.testing.expect(vertex.position[1] >= 0 and vertex.position[1] <= r.h);
+    }
+    try std.testing.expect(underlined);
+    canvas.len = 0;
+    try drawInput(&canvas, r, .{ .value = "ab\ncd", .multiline = true, .focused = true, .cursor = 4, .selection = .{ .start = 1, .end = 4 } });
+    var selected = false;
+    for (canvas.items()) |vertex| if (vertex.color[3] == 0.4) {
+        selected = true;
+        try std.testing.expect(vertex.position[0] >= area.x and vertex.position[0] <= area.x + area.w);
+    };
+    try std.testing.expect(selected);
+}
+
+test "focused empty input retains placeholder beside caret and rejects invalid preedit" {
+    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var vertices: [1024]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    const r = Rect{ .x = 10, .y = 20, .w = 140, .h = 34 };
+    try drawInput(&canvas, r, .{ .focused = true, .placeholder = "Placeholder", .cursor = 0 });
+    var muted = false;
+    for (canvas.items()) |vertex| {
+        if (vertex.color[0] == canvas.theme.muted_foreground[0] and vertex.color[3] == 1) muted = true;
+    }
+    try std.testing.expect(muted);
+    try std.testing.expectEqual(canvas.theme.foreground[0], canvas.items()[canvas.len - 1].color[0]);
+    canvas.len = 0;
+    try std.testing.expectError(error.InvalidUtf8, drawInput(&canvas, r, .{
+        .focused = true,
+        .value = "abc",
+        .cursor = 1,
+        .composition = .{ .text = "\xff" },
+    }));
 }
 
 test "chart rejects invalid data before drawing and progress clamps to the track" {

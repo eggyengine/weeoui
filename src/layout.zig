@@ -22,6 +22,12 @@ pub const Style = struct {
     padding: Insets = .{},
     align_items: enum { start, center, end } = .start,
     overflow: enum { visible, scroll } = .visible,
+    z_index: i16 = 0,
+};
+pub const Overlay = union(enum) {
+    anchor: struct { target: *const Element, gap: f32 = 4 },
+    point: Vec2,
+    viewport,
 };
 pub const Text = struct { value: []const u8, size: f32 = 16, tone: enum { foreground, muted } = .foreground, wrap: bool = false, alignment: Canvas.TextAlign = .start };
 pub const Paint = union(enum) {
@@ -39,6 +45,7 @@ pub const Paint = union(enum) {
     radio: primitives.Radio,
     progress: f32,
     skeleton,
+    animated_skeleton: f32,
     spinner: f32,
     avatar: []const u8,
     icon: Icon,
@@ -58,13 +65,16 @@ pub const Paint = union(enum) {
 pub const ScrollState = @import("scroll.zig").ScrollState;
 
 pub const Accessibility = struct {
-    pub const Role = enum { group, label, heading, button, checkbox, switch_control, slider, input, radio, radio_group, progress, tab, tab_list, tab_panel, image, alert, dialog, alert_dialog, menu, menu_item, table, row, cell, column_header, ignored };
+    pub const Role = enum { group, region, log, label, heading, button, checkbox, switch_control, slider, input, radio, radio_group, progress, tab, tab_list, tab_panel, image, alert, status, tooltip, dialog, alert_dialog, menu, menu_item, table, row, cell, column_header, ignored };
     role: ?Role = null,
     label: ?[]const u8 = null,
     description: ?[]const u8 = null,
+    described_by: ?u32 = null,
+    controls: ?u32 = null,
     numeric_value: ?f32 = null,
     expanded: ?bool = null,
     modal: bool = false,
+    live: enum { off, polite, assertive } = .off,
     disabled: bool = false,
 };
 
@@ -74,9 +84,15 @@ pub const Element = struct {
     paint_kind: Paint = .none,
     accessibility: Accessibility = .{},
     children: []const *Element = &.{},
+    paint_order: []const usize = &.{},
+    overlay: ?Overlay = null,
+    has_overlays: bool = false,
     scroll: ?*ScrollState = null,
     bounds: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     clip: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    natural_width: ?f32 = null,
+    measured_height_width: ?f32 = null,
+    measured_height: f32 = 0,
 
     pub fn find(self: *const Element, id: u32) ?*const Element {
         if (self.id == id and id != 0) return self;
@@ -105,15 +121,52 @@ pub const Element = struct {
         };
     }
     pub fn scrollAt(self: *const Element, x: f32, y: f32) ?*ScrollState {
-        if (!self.bounds.intersection(self.clip).contains(x, y)) return null;
+        var above: ?i16 = null;
+        while (self.overlayLayerBefore(above)) |z| {
+            if (self.scrollOverlayLayerAt(x, y, z)) |state| return state;
+            above = z;
+        }
+        return self.scrollBaseAt(x, y);
+    }
+    fn scrollBaseAt(self: *const Element, x: f32, y: f32) ?*ScrollState {
+        if (self.overlay != null) return null;
+        return self.scrollSubtreeAt(x, y);
+    }
+    fn scrollSubtreeAt(self: *const Element, x: f32, y: f32) ?*ScrollState {
+        const within = self.bounds.intersection(self.clip).contains(x, y);
+        if (!within and !self.has_overlays) return null;
         var i = self.children.len;
         while (i > 0) {
             i -= 1;
-            if (self.children[i].scrollAt(x, y)) |scroll| return scroll;
+            const child = self.paintChild(i);
+            if (self.overlay != null) {
+                if (child.scrollSubtreeAt(x, y)) |state| return state;
+            } else if (child.scrollBaseAt(x, y)) |state| return state;
         }
-        return self.scroll;
+        return if (within) self.scroll else null;
+    }
+    fn overlayLayerBefore(self: *const Element, above: ?i16) ?i16 {
+        if (self.overlay != null) return if (above == null or self.style.z_index < above.?) self.style.z_index else null;
+        var layer: ?i16 = null;
+        for (self.children) |child| {
+            if (child.overlayLayerBefore(above)) |z| layer = if (layer) |current| @max(current, z) else z;
+        }
+        return layer;
+    }
+    fn scrollOverlayLayerAt(self: *const Element, x: f32, y: f32, z: i16) ?*ScrollState {
+        if (self.overlay != null) return if (self.style.z_index == z) self.scrollSubtreeAt(x, y) else null;
+        var i = self.children.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.paintChild(i).scrollOverlayLayerAt(x, y, z)) |state| return state;
+        }
+        return null;
+    }
+    pub fn paintChild(self: *const Element, index: usize) *Element {
+        return self.children[if (self.paint_order.len == 0) index else self.paint_order[index]];
     }
     pub fn layout(self: *Element, viewport: Rect, font: *const Font) void {
+        clearMeasurements(self);
         place(self, viewport, viewport, font);
     }
     pub fn render(self: *Element, viewport: Rect, c: *Canvas) !void {
@@ -121,11 +174,47 @@ pub const Element = struct {
         try self.draw(c);
     }
     pub fn draw(self: *const Element, c: *Canvas) !void {
+        return self.drawBase(c, false);
+    }
+    pub fn drawWithoutOverlays(self: *const Element, c: *Canvas) !void {
+        return self.drawBase(c, true);
+    }
+    pub fn drawOverlays(self: *const Element, c: *Canvas) !void {
+        var after: ?i16 = null;
+        while (self.overlayLayerAfter(after)) |z| {
+            try self.drawOverlayLayer(c, z);
+            after = z;
+        }
+    }
+    pub fn overlayLayerAfter(self: *const Element, after: ?i16) ?i16 {
+        if (self.overlay != null) {
+            return if (after == null or self.style.z_index > after.?) self.style.z_index else null;
+        }
+        var next_layer: ?i16 = null;
+        for (self.children) |child| {
+            if (child.overlayLayerAfter(after)) |z| next_layer = if (next_layer) |current| @min(current, z) else z;
+        }
+        return next_layer;
+    }
+    fn drawOverlayLayer(self: *const Element, c: *Canvas, z: i16) !void {
+        if (self.overlay != null) {
+            if (self.style.z_index == z) try self.draw(c);
+            return;
+        }
+        for (0..self.children.len) |i| try self.paintChild(i).drawOverlayLayer(c, z);
+    }
+    fn drawBase(self: *const Element, c: *Canvas, skip_overlays: bool) !void {
+        if (skip_overlays and self.overlay != null) return;
         const previous = c.clip;
         c.clip = self.clip;
         defer c.clip = previous;
         const previous_foreground = c.theme.foreground;
         defer c.theme.foreground = previous_foreground;
+        const visible = self.bounds.intersection(self.clip);
+        if ((visible.w <= 0 or visible.h <= 0) and self.paint_kind != .card and self.paint_kind != .surface) {
+            for (0..self.children.len) |i| try self.paintChild(i).drawBase(c, skip_overlays);
+            return;
+        }
         switch (self.paint_kind) {
             .none => {},
             .card => {
@@ -134,9 +223,16 @@ pub const Element = struct {
             },
             .separator => try c.rect(self.bounds, c.theme.border),
             .text => |t| {
-                c.clip = self.clip.intersection(self.bounds);
+                const padding = self.style.padding;
+                const text_bounds = Rect{
+                    .x = self.bounds.x + padding.left,
+                    .y = self.bounds.y + padding.top,
+                    .w = @max(0, self.bounds.w - padding.left - padding.right),
+                    .h = @max(0, self.bounds.h - padding.top - padding.bottom),
+                };
+                c.clip = self.clip.intersection(text_bounds);
                 const color = if (t.tone == .muted) c.theme.muted_foreground else c.theme.foreground;
-                if (t.wrap) try c.textWrappedInAligned(self.bounds, t.value, t.size, color, t.alignment) else try c.textIn(self.bounds, t.value, t.size, color, t.alignment);
+                if (t.wrap) try c.textWrappedInAligned(text_bounds, t.value, t.size, color, t.alignment) else try c.textIn(text_bounds, t.value, t.size, color, t.alignment);
                 c.clip = self.clip;
             },
             .badge => |label| try @import("components/badge.zig").draw(c, self.bounds, label),
@@ -149,6 +245,7 @@ pub const Element = struct {
             .radio => |value| try primitives.drawRadio(c, self.bounds, value),
             .progress => |value| try primitives.drawProgress(c, self.bounds, value),
             .skeleton => try primitives.drawSkeleton(c, self.bounds),
+            .animated_skeleton => |phase| try primitives.drawAnimatedSkeleton(c, self.bounds, phase),
             .spinner => |phase| try primitives.drawSpinner(c, self.bounds, phase),
             .avatar => |initials| try primitives.drawAvatar(c, self.bounds, initials),
             .icon => |icon| try c.icon(self.bounds, icon, c.theme.foreground),
@@ -168,9 +265,15 @@ pub const Element = struct {
             .backdrop => try c.rectAlpha(self.bounds, .{ 0, 0, 0 }, 0.45),
             .custom => |custom| try custom.draw(custom.context, c, self.bounds),
         }
-        for (self.children) |child| try child.draw(c);
+        for (0..self.children.len) |i| try self.paintChild(i).drawBase(c, skip_overlays);
     }
 };
+
+fn clearMeasurements(node: *Element) void {
+    node.natural_width = null;
+    node.measured_height_width = null;
+    for (node.children) |child| clearMeasurements(child);
+}
 
 pub const Builder = struct {
     allocator: std.mem.Allocator,
@@ -178,6 +281,25 @@ pub const Builder = struct {
         const result = try self.allocator.create(Element);
         errdefer self.allocator.destroy(result);
         result.* = .{ .id = id, .style = style, .paint_kind = paint_kind, .children = if (children.len == 0) &.{} else try self.allocator.dupe(*Element, children) };
+        for (children) |child| result.has_overlays = result.has_overlays or child.overlay != null or child.has_overlays;
+        if (children.len > 1) {
+            var ordered = false;
+            for (children) |child| if (child.style.z_index != 0) {
+                ordered = true;
+                break;
+            };
+            if (ordered) {
+                const order = try self.allocator.alloc(usize, children.len);
+                for (order, 0..) |*slot, i| {
+                    slot.* = i;
+                    var j = i;
+                    while (j > 0 and children[order[j - 1]].style.z_index > children[order[j]].style.z_index) : (j -= 1) {
+                        std.mem.swap(usize, &order[j - 1], &order[j]);
+                    }
+                }
+                result.paint_order = order;
+            }
+        }
         return result;
     }
     pub fn text(self: Builder, value: []const u8) !*Element {
@@ -226,6 +348,10 @@ pub const Builder = struct {
     pub fn skeleton(self: Builder, width: f32, height: f32) !*Element {
         if (!std.math.isFinite(width) or !std.math.isFinite(height) or width <= 0 or height <= 0) return error.InvalidSize;
         return self.node(0, .{ .width = width, .height = height }, .skeleton, &.{});
+    }
+    pub fn animatedSkeleton(self: Builder, width: f32, height: f32, phase: f32) !*Element {
+        if (!std.math.isFinite(width) or !std.math.isFinite(height) or width <= 0 or height <= 0 or !std.math.isFinite(phase) or phase < 0 or phase > 1) return error.InvalidSize;
+        return self.node(0, .{ .width = width, .height = height }, .{ .animated_skeleton = phase }, &.{});
     }
     pub fn spinner(self: Builder, phase: f32) !*Element {
         if (!std.math.isFinite(phase) or phase < 0 or phase > 1) return error.InvalidPhase;
@@ -285,11 +411,15 @@ test "simple builder retains advanced styling and interaction" {
 fn widthFor(style: Style, available: f32) f32 {
     return @max(style.min_width, @min(style.max_width orelse std.math.inf(f32), style.width orelse available));
 }
-fn naturalWidth(node: *const Element, font: *const Font) f32 {
+fn naturalWidth(node: *Element, font: *const Font) f32 {
+    if (node.natural_width) |width| return width;
     if (node.style.width) |width| return widthFor(node.style, width);
     var width: f32 = 0;
     if (node.children.len > 0) {
+        var count: usize = 0;
         for (node.children) |child| {
+            if (child.overlay != null) continue;
+            count += 1;
             const child_width = naturalWidth(child, font);
             if (node.style.direction == .row) {
                 width += child_width;
@@ -297,35 +427,51 @@ fn naturalWidth(node: *const Element, font: *const Font) f32 {
                 width = @max(width, child_width);
             }
         }
-        if (node.style.direction == .row) width += @as(f32, @floatFromInt(node.children.len - 1)) * node.style.gap;
+        if (node.style.direction == .row) width += @as(f32, @floatFromInt(count -| 1)) * node.style.gap;
     } else switch (node.paint_kind) {
         .text => |t| width = font.measure(t.value, t.size),
         else => {},
     }
-    return widthFor(node.style, @max(node.style.min_width, width + node.style.padding.left + node.style.padding.right));
+    const result = widthFor(node.style, @max(node.style.min_width, width + node.style.padding.left + node.style.padding.right));
+    node.natural_width = result;
+    return result;
 }
-fn rowWidth(parent: *const Element, child: *const Element, inner_width: f32, font: *const Font) f32 {
+fn rowWidth(parent: *Element, child: *Element, inner_width: f32, font: *const Font) f32 {
     var basis: f32 = 0;
     var grows: f32 = 0;
     for (parent.children) |other| {
+        if (other.overlay != null) continue;
         basis += naturalWidth(other, font);
         if (other.style.width == null) grows += other.style.grow;
     }
-    basis += @as(f32, @floatFromInt(parent.children.len -| 1)) * parent.style.gap;
+    var flow_count: usize = 0;
+    for (parent.children) |other| if (other.overlay == null) {
+        flow_count += 1;
+    };
+    basis += @as(f32, @floatFromInt(flow_count -| 1)) * parent.style.gap;
     const extra = @max(0, inner_width - basis);
     const proposed = naturalWidth(child, font) + (if (child.style.width == null and grows > 0) extra * child.style.grow / grows else 0);
     return widthFor(child.style, proposed);
 }
-fn estimatedHeight(node: *const Element, width: f32, font: *const Font) f32 {
+fn estimatedHeight(node: *Element, width: f32, font: *const Font) f32 {
     if (node.style.height) |height| return height;
+    if (node.measured_height_width == width) return node.measured_height;
     const inner_width = @max(0, width - node.style.padding.left - node.style.padding.right);
     var height: f32 = 0;
     if (node.children.len > 0) {
         if (node.style.direction == .column) {
-            for (node.children) |child| height += estimatedHeight(child, widthFor(child.style, inner_width), font);
-            height += @as(f32, @floatFromInt(node.children.len - 1)) * node.style.gap;
+            var flow_count: usize = 0;
+            for (node.children) |child| {
+                if (child.overlay != null) continue;
+                flow_count += 1;
+                height += estimatedHeight(child, widthFor(child.style, inner_width), font);
+            }
+            height += @as(f32, @floatFromInt(flow_count -| 1)) * node.style.gap;
         } else {
-            for (node.children) |child| height = @max(height, estimatedHeight(child, rowWidth(node, child, inner_width, font), font));
+            for (node.children) |child| {
+                if (child.overlay != null) continue;
+                height = @max(height, estimatedHeight(child, rowWidth(node, child, inner_width, font), font));
+            }
         }
     } else {
         switch (node.paint_kind) {
@@ -336,7 +482,9 @@ fn estimatedHeight(node: *const Element, width: f32, font: *const Font) f32 {
             else => {},
         }
     }
-    return @max(node.style.min_height, @min(node.style.max_height orelse std.math.inf(f32), height + node.style.padding.top + node.style.padding.bottom));
+    node.measured_height = @max(node.style.min_height, @min(node.style.max_height orelse std.math.inf(f32), height + node.style.padding.top + node.style.padding.bottom));
+    node.measured_height_width = width;
+    return node.measured_height;
 }
 fn place(node: *Element, r: Rect, inherited_clip: Rect, font: *const Font) void {
     node.bounds = r;
@@ -355,19 +503,25 @@ fn place(node: *Element, r: Rect, inherited_clip: Rect, font: *const Font) void 
     var content_height: f32 = p.top + p.bottom;
     if (node.children.len > 0) {
         if (node.style.direction == .column) {
+            var flow_count: usize = 0;
             for (node.children) |child| {
+                if (child.overlay != null) continue;
+                flow_count += 1;
                 const width = widthFor(child.style, inner_width);
                 content_width = @max(content_width, width + p.left + p.right);
                 content_height += estimatedHeight(child, width, font);
             }
-            content_height += @as(f32, @floatFromInt(node.children.len - 1)) * node.style.gap;
+            content_height += @as(f32, @floatFromInt(flow_count -| 1)) * node.style.gap;
         } else {
+            var flow_count: usize = 0;
             for (node.children) |child| {
+                if (child.overlay != null) continue;
+                flow_count += 1;
                 const width = rowWidth(node, child, inner_width, font);
                 content_width += width;
                 content_height = @max(content_height, estimatedHeight(child, width, font) + p.top + p.bottom);
             }
-            content_width += @as(f32, @floatFromInt(node.children.len - 1)) * node.style.gap;
+            content_width += @as(f32, @floatFromInt(flow_count -| 1)) * node.style.gap;
         }
     }
     if (node.scroll) |scroll| {
@@ -381,11 +535,12 @@ fn place(node: *Element, r: Rect, inherited_clip: Rect, font: *const Font) void 
     if (node.style.direction == .column) {
         var grows: f32 = 0;
         for (node.children) |child| if (child.style.height == null) {
-            grows += child.style.grow;
+            if (child.overlay == null) grows += child.style.grow;
         };
         const free = if (node.style.overflow == .scroll) 0 else @max(0, r.h - content_height);
         var y = r.y + p.top - dy;
         for (node.children) |child| {
+            if (child.overlay != null) continue;
             const width = widthFor(child.style, inner_width);
             const natural = estimatedHeight(child, width, font);
             const height = natural + (if (child.style.height == null and grows > 0) free * child.style.grow / grows else 0);
@@ -400,6 +555,7 @@ fn place(node: *Element, r: Rect, inherited_clip: Rect, font: *const Font) void 
     } else {
         var x = r.x + p.left - dx;
         for (node.children) |child| {
+            if (child.overlay != null) continue;
             const width = rowWidth(node, child, inner_width, font);
             const height = estimatedHeight(child, width, font);
             const align_y: f32 = switch (node.style.align_items) {
@@ -410,6 +566,36 @@ fn place(node: *Element, r: Rect, inherited_clip: Rect, font: *const Font) void 
             place(child, .{ .x = x, .y = r.y + p.top + align_y - dy, .w = width, .h = height }, child_clip, font);
             x += width + node.style.gap;
         }
+    }
+    for (0..node.children.len) |i| {
+        const child = node.paintChild(i);
+        const overlay = child.overlay orelse continue;
+        const width = widthFor(child.style, inherited_clip.w);
+        const height = estimatedHeight(child, width, font);
+        var x: f32 = inherited_clip.x;
+        var y: f32 = inherited_clip.y;
+        switch (overlay) {
+            .anchor => |position| {
+                const anchor_visible = position.target.bounds.intersection(position.target.clip);
+                if (anchor_visible.w <= 0 or anchor_visible.h <= 0) {
+                    place(child, .{ .x = 0, .y = 0, .w = width, .h = height }, .{ .x = 0, .y = 0, .w = 0, .h = 0 }, font);
+                    continue;
+                }
+                x = position.target.bounds.x;
+                y = position.target.bounds.y + position.target.bounds.h + position.gap;
+                if (y + height > inherited_clip.y + inherited_clip.h and position.target.bounds.y - position.gap - height >= inherited_clip.y) {
+                    y = position.target.bounds.y - position.gap - height;
+                }
+            },
+            .point => |point| {
+                x = point.x;
+                y = point.y;
+            },
+            .viewport => {},
+        }
+        x = std.math.clamp(x, inherited_clip.x, @max(inherited_clip.x, inherited_clip.x + inherited_clip.w - width));
+        y = std.math.clamp(y, inherited_clip.y, @max(inherited_clip.y, inherited_clip.y + inherited_clip.h - height));
+        place(child, .{ .x = x, .y = y, .w = width, .h = height }, inherited_clip, font);
     }
 }
 
@@ -461,4 +647,125 @@ test "row and column alignment use measured child dimensions" {
     text_row.layout(.{ .x = 0, .y = 0, .w = 200, .h = 32 }, &font);
     try std.testing.expectApproxEqAbs(font.measure("Some text", 16), first.bounds.w, 0.01);
     try std.testing.expectApproxEqAbs(first.bounds.x + first.bounds.w, second.bounds.x, 0.01);
+}
+
+test "layout caches measurements per pass and remeasures at a new width" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    const text = try b.node(1, .{}, .{ .text = .{ .value = "Wrapped text changes height when its width changes", .wrap = true } }, &.{});
+    const root = try b.node(0, .{}, .none, &.{text});
+    root.layout(.{ .x = 0, .y = 0, .w = 200, .h = 200 }, &font);
+    const wide_height = text.bounds.h;
+    try std.testing.expect(text.measured_height_width != null);
+    root.layout(.{ .x = 0, .y = 0, .w = 80, .h = 200 }, &font);
+    try std.testing.expect(text.bounds.h > wide_height);
+    try std.testing.expectEqual(@as(?f32, 80), text.measured_height_width);
+}
+
+test "clipped parent skips its own paint without hiding overflowing children" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    const parent = try b.node(1, .{ .width = 20, .height = 20 }, .skeleton, &.{try b.node(2, .{ .width = 10, .height = 10 }, .skeleton, &.{})});
+    parent.bounds = .{ .x = -30, .y = 0, .w = 20, .h = 20 };
+    parent.clip = .{ .x = 0, .y = 0, .w = 20, .h = 20 };
+    parent.children[0].bounds = .{ .x = 4, .y = 4, .w = 10, .h = 10 };
+    parent.children[0].clip = parent.clip;
+    var vertices: [1024]types.Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    try parent.draw(&canvas);
+    try std.testing.expect(canvas.len > 0);
+    for (canvas.items()) |vertex| try std.testing.expect(vertex.position[0] >= 0);
+}
+
+test "overlay escapes flow, flips at viewport edge, and paints above its trigger" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    const trigger = try b.node(1, .{ .height = 30 }, .{ .button = .{ .label = "Options" } }, &.{});
+    const panel = try b.node(2, .{ .width = 100, .height = 70, .z_index = 10 }, .{ .surface = .popover }, &.{});
+    panel.overlay = .{ .anchor = .{ .target = trigger } };
+    const root = try b.node(0, .{ .height = 120 }, .none, &.{
+        try b.node(0, .{ .height = 88 }, .none, &.{}),
+        trigger,
+        panel,
+    });
+    root.layout(.{ .x = 0, .y = 0, .w = 140, .h = 120 }, &font);
+    try std.testing.expectEqual(@as(f32, 88), trigger.bounds.y);
+    try std.testing.expect(panel.bounds.y < trigger.bounds.y);
+    try std.testing.expectEqual(@as(f32, 100), panel.bounds.w);
+    try std.testing.expectEqual(@as(*Element, panel), root.paintChild(root.children.len - 1));
+    var vertices: [2000]types.Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    try root.drawWithoutOverlays(&canvas);
+    const base_vertices = canvas.len;
+    try root.drawOverlays(&canvas);
+    try std.testing.expect(canvas.len > base_vertices);
+    try std.testing.expect(root.hit(2, panel.bounds.x + 2, panel.bounds.y + 2));
+}
+
+test "overlay layers paint globally in z order and scroll outside anchor bounds" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    const paint = struct {
+        fn draw(context: *const anyopaque, canvas: *Canvas, r: Rect) !void {
+            const color: *const types.Color = @ptrCast(@alignCast(context));
+            try canvas.rect(r, color.*);
+        }
+    }.draw;
+    const back_color = types.Color{ 1, 0, 0 };
+    const front_color = types.Color{ 0, 0, 1 };
+    var panel_scroll: ScrollState = .{};
+    var back_scroll: ScrollState = .{};
+    const front = try b.node(11, .{ .width = 30, .height = 30, .z_index = 200, .overflow = .scroll }, .{ .custom = .{ .context = &front_color, .draw = paint } }, &.{try b.node(0, .{ .height = 90 }, .none, &.{})});
+    front.overlay = .{ .point = .init(100, 20) };
+    front.scroll = &panel_scroll;
+    const back = try b.node(12, .{ .width = 30, .height = 30, .z_index = 100, .overflow = .scroll }, .{ .custom = .{ .context = &back_color, .draw = paint } }, &.{try b.node(0, .{ .height = 90 }, .none, &.{})});
+    back.overlay = .{ .point = .init(100, 20) };
+    back.scroll = &back_scroll;
+    const first = try b.node(0, .{ .width = 40, .height = 40 }, .none, &.{front});
+    const second = try b.node(0, .{ .width = 40, .height = 40 }, .none, &.{back});
+    const root = try b.node(0, .{ .direction = .row }, .none, &.{ first, second });
+    root.layout(.{ .x = 0, .y = 0, .w = 200, .h = 80 }, &font);
+    try std.testing.expect(root.scrollAt(110, 25) == &panel_scroll);
+    var vertices: [128]types.Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    try root.drawOverlays(&canvas);
+    try std.testing.expect(canvas.len >= 12);
+    try std.testing.expectEqual(@as(f32, 1), canvas.items()[0].color[0]);
+    try std.testing.expectEqual(@as(f32, 1), canvas.items()[canvas.len - 1].color[2]);
+}
+
+test "anchored popups disappear when their trigger scrolls fully out of view" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    const trigger = try b.button(1, "Options");
+    const panel = try b.node(2, .{ .width = 100, .height = 60, .z_index = 10 }, .{ .surface = .menu }, &.{});
+    panel.overlay = .{ .anchor = .{ .target = trigger } };
+    const container = try b.node(0, .{ .height = 100, .overflow = .scroll }, .none, &.{
+        try b.node(0, .{ .height = 160 }, .none, &.{}),
+        trigger,
+        panel,
+    });
+    var scroll: ScrollState = .{};
+    container.scroll = &scroll;
+    container.layout(.{ .x = 0, .y = 0, .w = 200, .h = 100 }, &font);
+    try std.testing.expectEqual(@as(f32, 0), panel.clip.h);
+    try std.testing.expect(!container.hit(2, 2, 2));
+    scroll.offset.y = 140;
+    container.layout(.{ .x = 0, .y = 0, .w = 200, .h = 100 }, &font);
+    try std.testing.expect(panel.clip.h > 0);
 }
