@@ -15,6 +15,7 @@ pub const Canvas = struct {
     theme: types.Theme = .{},
     clip: ?Rect = null,
     pixel_scale: [2]f32 = .{ 1, 1 },
+    srgb_target: bool = false,
 
     pub fn init(vertices: []Vertex, font: *const Font) Canvas {
         return .{ .vertices = vertices, .font = font };
@@ -31,6 +32,22 @@ pub const Canvas = struct {
         const right = @max(x + 1, @round((r.x + r.w) * sx));
         const bottom = @max(y + 1, @round((r.y + r.h) * sy));
         try self.quad(.{ .x = x / sx, .y = y / sy, .w = (right - x) / sx, .h = (bottom - y) / sy }, .{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 }, color);
+    }
+    pub fn roundRect(self: *Canvas, r: Rect, color: Color, radius: f32) !void {
+        if (r.w <= 0 or r.h <= 0) return;
+        const corner = @max(0, @min(radius, @min(r.w, r.h) / 2));
+        if (corner < 1) return self.rect(r, color);
+        try self.rect(.{ .x = r.x, .y = r.y + corner, .w = r.w, .h = r.h - 2 * corner }, color);
+        var y: f32 = 0;
+        while (y < corner) {
+            const band = @min(1 / @max(1, self.pixel_scale[1]), corner - y);
+            const dy = corner - y - band / 2;
+            const inset = corner - @sqrt(@max(0, corner * corner - dy * dy));
+            const strip = Rect{ .x = r.x + inset, .y = r.y + y, .w = r.w - 2 * inset, .h = band };
+            try self.rect(strip, color);
+            try self.rect(.{ .x = strip.x, .y = r.y + r.h - y - band, .w = strip.w, .h = band }, color);
+            y += band;
+        }
     }
     pub fn outline(self: *Canvas, r: Rect, color: Color) !void {
         try self.rect(.{ .x = r.x, .y = r.y, .w = r.w, .h = 1 }, color);
@@ -81,7 +98,12 @@ pub const Canvas = struct {
         const visible = if (self.clip) |clip| r.intersection(clip) else r;
         if (visible.w <= 0 or visible.h <= 0) return;
         if (self.len + 6 > self.vertices.len) return error.OutOfVertices;
-        const rgba: [4]f32 = .{ color[0], color[1], color[2], 1 };
+        const rgba: [4]f32 = .{
+            if (self.srgb_target) types.linearChannel(color[0]) else color[0],
+            if (self.srgb_target) types.linearChannel(color[1]) else color[1],
+            if (self.srgb_target) types.linearChannel(color[2]) else color[2],
+            1,
+        };
         const u_start = uv.x + (visible.x - r.x) / r.w * uv.w;
         const v_start = uv.y + (visible.y - r.y) / r.h * uv.h;
         const u_end = uv.x + (visible.x + visible.w - r.x) / r.w * uv.w;
@@ -156,4 +178,26 @@ test "solid rectangles snap to physical pixels without changing text vertices" {
     try canvas.text(1.2, 2.2, "A", 16, .{ 1, 1, 1 });
     const strike = font.strike(16);
     try std.testing.expectApproxEqAbs(@as(f32, 1.2) + @as(f32, @floatFromInt(strike.glyph('A').left)) * 16 / strike.size, canvas.items()[before].position[0], 0.001);
+}
+
+test "rounded rectangles leave corners empty and honor custom radius" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var vertices: [180]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    try canvas.roundRect(.{ .x = 0, .y = 0, .w = 20, .h = 20 }, .{ 1, 1, 1 }, 5);
+    try std.testing.expect(canvas.len > 6);
+    for (canvas.items()) |vertex| {
+        try std.testing.expect(!(vertex.position[0] == 0 and vertex.position[1] == 0));
+    }
+}
+
+test "sRGB target linearizes theme colors before framebuffer encoding" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var vertices: [6]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    canvas.srgb_target = true;
+    try canvas.rect(.{ .x = 0, .y = 0, .w = 10, .h = 10 }, .{ 0.5, 0.5, 0.5 });
+    try std.testing.expectApproxEqAbs(@as(f32, 0.214), canvas.items()[0].color[0], 0.001);
 }

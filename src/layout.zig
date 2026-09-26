@@ -21,17 +21,17 @@ pub const Style = struct {
     align_items: enum { start, center } = .start,
     overflow: enum { visible, scroll } = .visible,
 };
-pub const Text = struct { value: []const u8, size: f32, tone: enum { foreground, muted } = .foreground, wrap: bool = false };
+pub const Text = struct { value: []const u8, size: f32 = 16, tone: enum { foreground, muted } = .foreground, wrap: bool = false };
 pub const Paint = union(enum) {
     none,
     card,
     separator,
     text: Text,
     badge: []const u8,
-    button: struct { label: []const u8, primary: bool = true, hot: bool, focused: bool },
-    checkbox: struct { label: []const u8, checked: bool, focused: bool },
-    toggle: struct { label: []const u8, enabled: bool, focused: bool },
-    slider: struct { value: f32, focused: bool },
+    button: struct { label: []const u8, primary: bool = true, hot: bool = false, focused: bool = false },
+    checkbox: struct { label: []const u8, checked: bool = false, focused: bool = false },
+    toggle: struct { label: []const u8, enabled: bool = false, focused: bool = false },
+    slider: struct { value: f32 = 0, focused: bool = false },
     scrollbar: struct { state: *ScrollState, axis: ScrollState.Axis },
     custom: struct {
         context: *const anyopaque,
@@ -63,16 +63,25 @@ pub const Element = struct {
     pub fn layout(self: *Element, viewport: Rect, font: *const Font) void {
         place(self, viewport, viewport, font);
     }
+    pub fn render(self: *Element, viewport: Rect, c: *Canvas) !void {
+        self.layout(viewport, c.font);
+        try self.draw(c);
+    }
     pub fn draw(self: *const Element, c: *Canvas) !void {
         const previous = c.clip;
         c.clip = self.clip;
         defer c.clip = previous;
+        const previous_foreground = c.theme.foreground;
+        defer c.theme.foreground = previous_foreground;
         switch (self.paint_kind) {
             .none => {},
-            .card => try @import("components/card.zig").draw(c, self.bounds),
+            .card => {
+                try @import("components/card.zig").draw(c, self.bounds);
+                c.theme.foreground = c.theme.card_foreground;
+            },
             .separator => try c.rect(self.bounds, c.theme.border),
             .text => |t| {
-                const color = if (t.tone == .muted) c.theme.muted else c.theme.foreground;
+                const color = if (t.tone == .muted) c.theme.muted_foreground else c.theme.foreground;
                 if (t.wrap) try c.textWrappedIn(self.bounds, t.value, t.size, color) else try c.textIn(self.bounds, t.value, t.size, color, .start);
             },
             .badge => |label| try @import("components/badge.zig").draw(c, self.bounds, label),
@@ -92,10 +101,49 @@ pub const Builder = struct {
     pub fn node(self: Builder, id: u32, style: Style, paint_kind: Paint, children: []const *Element) !*Element {
         const result = try self.allocator.create(Element);
         errdefer self.allocator.destroy(result);
-        result.* = .{ .id = id, .style = style, .paint_kind = paint_kind, .children = try self.allocator.dupe(*Element, children) };
+        result.* = .{ .id = id, .style = style, .paint_kind = paint_kind, .children = if (children.len == 0) &.{} else try self.allocator.dupe(*Element, children) };
         return result;
     }
+    pub fn text(self: Builder, value: []const u8) !*Element {
+        return self.node(0, .{}, .{ .text = .{ .value = value } }, &.{});
+    }
+    pub fn row(self: Builder, children: []const *Element) !*Element {
+        return self.node(0, .{ .direction = .row }, .none, children);
+    }
+    pub fn column(self: Builder, children: []const *Element) !*Element {
+        return self.node(0, .{}, .none, children);
+    }
+    pub fn card(self: Builder, children: []const *Element) !*Element {
+        return self.node(0, .{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = 24 }, .gap = 12 }, .card, children);
+    }
+    pub fn button(self: Builder, id: u32, label: []const u8) !*Element {
+        return self.node(id, .{ .width = 120, .height = 40 }, .{ .button = .{ .label = label } }, &.{});
+    }
 };
+
+test "simple builder retains advanced styling and interaction" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    const action = try b.button(7, "Save");
+    action.paint_kind.button.focused = true;
+    const root = try b.card(&.{ try b.text("Preferences"), try b.row(&.{action}) });
+    var vertices: [1024]types.Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    canvas.theme.card_foreground = .{ 1, 0, 0 };
+    try root.render(.{ .x = 0, .y = 0, .w = 240, .h = 140 }, &canvas);
+    try std.testing.expect(root.hit(7, action.bounds.x + 1, action.bounds.y + 1));
+    try std.testing.expect(action.paint_kind.button.focused);
+    try std.testing.expect(canvas.len > 0);
+    var found_card_text = false;
+    for (canvas.items()) |vertex| {
+        if (vertex.color[0] == 1 and vertex.color[1] == 0 and vertex.color[2] == 0) found_card_text = true;
+    }
+    try std.testing.expect(found_card_text);
+    try std.testing.expectEqual((types.Theme{}).foreground, canvas.theme.foreground);
+}
 
 fn widthFor(style: Style, available: f32) f32 {
     return @max(style.min_width, @min(style.max_width orelse std.math.inf(f32), style.width orelse available));

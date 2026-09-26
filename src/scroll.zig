@@ -75,11 +75,11 @@ pub const ScrollState = struct {
     pub fn drawBar(self: *const ScrollState, c: *Canvas, axis: Axis) !void {
         if (axis == .vertical and self.vertical_bar.h >= 16 and self.content.y > self.viewport.h) {
             try c.rect(.{ .x = self.vertical_bar.x + (self.vertical_bar.w - 6) / 2, .y = self.vertical_bar.y + 4, .w = 6, .h = self.vertical_bar.h - 8 }, c.theme.border);
-            try c.rect(self.verticalThumb(), c.theme.muted);
+            try c.roundRect(self.verticalThumb(), c.theme.muted_foreground, @min(c.theme.radiusSm(), 3));
         }
         if (axis == .horizontal and self.horizontal_bar.w >= 16 and self.content.x > self.viewport.w) {
             try c.rect(.{ .x = self.horizontal_bar.x + 4, .y = self.horizontal_bar.y + (self.horizontal_bar.h - 6) / 2, .w = self.horizontal_bar.w - 8, .h = 6 }, c.theme.border);
-            try c.rect(self.horizontalThumb(), c.theme.muted);
+            try c.roundRect(self.horizontalThumb(), c.theme.muted_foreground, @min(c.theme.radiusSm(), 3));
         }
     }
 };

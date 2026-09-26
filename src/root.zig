@@ -4,6 +4,7 @@ pub const Color = types.Color;
 pub const Vertex = types.Vertex;
 pub const Rect = types.Rect;
 pub const Theme = types.Theme;
+pub const linearChannel = types.linearChannel;
 pub const Font = @import("font.zig").Font;
 pub const atlas_width = @import("font.zig").atlas_width;
 pub const atlas_height = @import("font.zig").atlas_height;

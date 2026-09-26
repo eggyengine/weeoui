@@ -58,7 +58,7 @@ pub const Font = struct {
             font.strikes[strike_index].size = @floatFromInt(strike_size);
             font.strikes[strike_index].ascent = @floatFromInt(face.*.size.*.metrics.ascender >> 6);
             for (32..127) |codepoint| {
-                if (c.FT_Load_Char(face, codepoint, c.FT_LOAD_RENDER) != 0) return error.GlyphLoadFailed;
+                if (c.FT_Load_Char(face, @intCast(codepoint), c.FT_LOAD_RENDER) != 0) return error.GlyphLoadFailed;
                 const slot = face.*.glyph;
                 const bitmap = slot.*.bitmap;
                 const w: usize = @intCast(bitmap.width);
