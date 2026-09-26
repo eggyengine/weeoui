@@ -1,8 +1,8 @@
 # weeoui
 
 weeoui is a UI library used in the eggy engine project. Its default visual
-tokens use the neutral shadcn/ui light palette, with a dark preset; it does not
-port shadcn components or require CSS. The defaults follow shadcn/ui's
+tokens use the neutral shadcn/ui light palette, with a dark preset. Its native
+controls do not copy React implementations or require CSS. The defaults follow shadcn/ui's
 [semantic theming](https://ui.shadcn.com/docs/theming) and
 [open-code, composable approach](https://ui.shadcn.com/docs): start with a
 working look, then replace any part of it.
@@ -25,10 +25,75 @@ control use `b.node(id, style, paint, children)` with explicit `Style` and
 color, radius, or text size via `canvas.theme = .{ .primary = ..., ... }`, or
 set `canvas.theme = weeoui.Theme.dark`. Supply your own TTF/OTF bytes to
 `Font.init` for typography and use `Canvas` primitives in custom painters.
+For icons, `b.icon(.search)` uses an atlas-backed Lucide glyph, and
+`canvas.icon(rect, .check, color)` lets custom painters choose its color and
+bounds. The five bundled SVGs (`search`, `check`, and the three chevrons) are
+pinned to Lucide revision `66d8f9fc394b8530377e5f6112f0b8908ba01280`
+under `src/assets/lucide/`, alongside their license. Pre-rasterized masks
+are embedded at build time; applications do not need an SVG renderer.
 When rendering to an sRGB framebuffer outside Eggy, set
 `canvas.srgb_target = true` so colors are encoded only once.
 When embedding in Eggy, set `Graphics.theme` so the background clear and
 components use the same colors.
+
+Weeoui also provides a platform-independent semantic snapshot of a laid-out
+tree. Give focusable elements stable nonzero IDs and pass the app's current
+focus to `weeoui.accessibility.collect(arena.allocator(), root, focused_id)`;
+the snapshot includes roles, labels, values, state, child relationships, and
+clipped bounds. Duplicate IDs or unknown focus are errors. Override inferred
+semantics with `element.accessibility = .{ .role = .button, .label = "Open",
+.description = "Opens settings" }`; mark purely decorative nodes with
+`.role = .ignored`. Hosts must connect snapshots and actions to a native
+accessibility adapter: Eggy's SDL3 host uses AccessKit and routes actions back
+to application-owned state. A semantic snapshot alone does not register
+screen-reader support.
+
+Set `.alignment = .start`, `.center`, or `.end` on a `Layout.Text` paint to
+align its visible ink (including wrapped lines) within its bounds.
+`Style.align_items` independently positions children on the cross axis; rows
+use their measured widths and natural child heights rather than stretching
+every child to the row height.
+
+Additional painted controls are `b.input`, `b.textarea`, `b.radio`, `b.progress`,
+`b.skeleton`, `b.spinner`, `b.avatar`, `b.tab`, `b.toggleButton`, `b.alert`,
+and `b.chart`. `weeoui.widgets` composes them without hiding the element tree:
+
+```zig
+const choices = [_]weeoui.widgets.Choice{
+    .{ .id = 10, .label = "General" },
+    .{ .id = 11, .label = "Advanced" },
+};
+const tabs = try weeoui.widgets.tabs(b, &choices, selected_id, &.{
+    try b.text("General settings"),
+    try b.text("Advanced settings"),
+});
+try tabs.render(viewport, &canvas);
+if (mouse_pressed and tabs.hit(11, mouse_x, mouse_y)) selected_id = 11;
+```
+
+| Native UI family | API |
+| --- | --- |
+| Fields, labels, input groups, OTP, selects, comboboxes | `widgets.field`, `inputGroup`, `inputOtp`, `select`, `combobox`, `command` |
+| Radio/toggle/button groups, tabs, accordion, collapsible | `widgets.radioGroup`, `toggleGroup`, `buttonGroup`, `tabs`, `accordion`, `disclosure` |
+| Dropdown/context menus, popovers, hover cards, tooltips | `widgets.menu`, `popover`, `hoverCard`, `tooltip` |
+| Dialogs, alert dialogs, sheets, drawers, alerts, toasts | `widgets.modal`, `b.alert`, `widgets.toast` |
+| Calendar, date picker, tables, sortable headers, pagination, breadcrumbs | `widgets.calendar`, `datePicker`, `table`, `dataTable`, `pagination`, `breadcrumb` |
+| Carousel, scroll area, resizable panes, aspect ratio | `widgets.carousel`, `scrollArea`, `resizable`, `aspectRatio` |
+| Sidebar, empty states, messages, item rows, keyboard hints, attachments, charts | `widgets.sidebar`, `empty`, `message`, `item`, `kbd`, `attachment`, `b.chart` |
+
+The same `menu` can anchor a dropdown, context menu, or menubar; positioning
+and open state are application-owned. `table` handles visible rows; `dataTable`
+adds clickable header IDs while the app sorts, filters, and pages data.
+`attachment` exposes a button ID for
+the app's native file picker. Modal overlays take the full viewport; render
+them after the underlying UI and route input to the modal instead of controls
+behind it. Pass the current animation phase to `spinner`.
+`calendar` and `datePicker` assign day IDs `first_id + day` (1-31). Use
+`widgets.form` for field groups and `messageScroller` for scrollable messages.
+UI strings
+currently render printable ASCII; non-ASCII text uses a fallback glyph until
+the font atlas supports dynamic Unicode. Browser-only integrations and
+app-specific data models are not bundled.
 
 Build a frame-local tree with `Layout.Builder.node`, call `root.layout(viewport, font)`, then `root.draw(canvas)`. Rows and columns support padding, gaps, fixed or weighted sizes, constraints, and scrollable overflow. Give interactive elements stable IDs and use `root.find(id)` or `root.hit(id, x, y)` after layout. Keep `Layout.ScrollState` in application state between frames; the elements themselves can be rebuilt each frame. See `src/ui_demo.zig` in Eggy for a complete example.
 

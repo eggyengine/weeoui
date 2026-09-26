@@ -5,6 +5,15 @@ const Rect = @import("types.zig").Rect;
 
 pub const atlas_width = 1024;
 pub const atlas_height = 1024;
+pub const Icon = enum { chevron_down, chevron_left, chevron_right, check, search };
+const icon_size = 48;
+const icon_masks = [_][]const u8{
+    @embedFile("assets/lucide/chevron-down.mask"),
+    @embedFile("assets/lucide/chevron-left.mask"),
+    @embedFile("assets/lucide/chevron-right.mask"),
+    @embedFile("assets/lucide/check.mask"),
+    @embedFile("assets/lucide/search.mask"),
+};
 
 pub const Glyph = struct {
     x: u16 = 0,
@@ -28,6 +37,7 @@ pub const Font = struct {
     allocator: std.mem.Allocator,
     pixels: []u8,
     strikes: [5]Strike = [_]Strike{.{}} ** 5,
+    icons: [icon_masks.len]Glyph = [_]Glyph{.{}} ** icon_masks.len,
     size: f32,
     dpi_scale: f32 = 1,
 
@@ -92,6 +102,21 @@ pub const Font = struct {
                 row_h = @max(row_h, h);
             }
         }
+        pen_x = 2;
+        pen_y += row_h + 2;
+        for (icon_masks, 0..) |mask, i| {
+            if (mask.len != icon_size * icon_size) return error.InvalidIconMask;
+            if (pen_x + icon_size + 1 > atlas_width) {
+                pen_x = 2;
+                pen_y += icon_size + 2;
+            }
+            if (pen_y + icon_size + 1 > atlas_height) return error.AtlasFull;
+            for (0..icon_size) |row| {
+                @memcpy(pixels[(pen_y + row) * atlas_width + pen_x ..][0..icon_size], mask[row * icon_size ..][0..icon_size]);
+            }
+            font.icons[i] = .{ .x = @intCast(pen_x), .y = @intCast(pen_y), .w = icon_size, .h = icon_size };
+            pen_x += icon_size + 2;
+        }
         return font;
     }
 
@@ -100,6 +125,9 @@ pub const Font = struct {
     }
     pub fn glyph(self: *const Font, byte: u8) Glyph {
         return self.strikes[2].glyph(byte);
+    }
+    pub fn icon(self: *const Font, value: Icon) Glyph {
+        return self.icons[@intFromEnum(value)];
     }
     pub fn strike(self: *const Font, requested_size: f32) *const Strike {
         var best: usize = 0;
@@ -190,4 +218,14 @@ test "rasterize supplied font and measure text" {
     font.dpi_scale = 2;
     try std.testing.expectEqual(@as(f32, 32), font.strike(16).size);
     try std.testing.expectEqual(@as(f32, 48), font.strike(24).size);
+    var large = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 64);
+    defer large.deinit();
+    try std.testing.expectEqual(@as(u16, icon_size), large.icon(.chevron_left).h);
+    const search = font.icon(.search);
+    try std.testing.expectEqual(@as(u16, icon_size), search.w);
+    var occupied = false;
+    for (0..icon_size) |row| for (0..icon_size) |column| {
+        if (font.pixels[(@as(usize, search.y) + row) * atlas_width + search.x + column] > 0) occupied = true;
+    };
+    try std.testing.expect(occupied);
 }

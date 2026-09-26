@@ -2,6 +2,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Font = @import("font.zig").Font;
+const Icon = @import("font.zig").Icon;
 const atlas_width = @import("font.zig").atlas_width;
 const atlas_height = @import("font.zig").atlas_height;
 const Rect = types.Rect;
@@ -24,6 +25,10 @@ pub const Canvas = struct {
         return self.vertices[0..self.len];
     }
     pub fn rect(self: *Canvas, r: Rect, color: Color) !void {
+        return self.rectAlpha(r, color, 1);
+    }
+    pub fn rectAlpha(self: *Canvas, r: Rect, color: Color, alpha: f32) !void {
+        if (!std.math.isFinite(alpha) or alpha < 0 or alpha > 1) return error.InvalidAlpha;
         if (r.w <= 0 or r.h <= 0) return;
         const sx = self.pixel_scale[0];
         const sy = self.pixel_scale[1];
@@ -31,7 +36,7 @@ pub const Canvas = struct {
         const y = @round(r.y * sy);
         const right = @max(x + 1, @round((r.x + r.w) * sx));
         const bottom = @max(y + 1, @round((r.y + r.h) * sy));
-        try self.quad(.{ .x = x / sx, .y = y / sy, .w = (right - x) / sx, .h = (bottom - y) / sy }, .{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 }, color);
+        try self.quad(.{ .x = x / sx, .y = y / sy, .w = (right - x) / sx, .h = (bottom - y) / sy }, .{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 }, color, alpha);
     }
     pub fn roundRect(self: *Canvas, r: Rect, color: Color, radius: f32) !void {
         if (r.w <= 0 or r.h <= 0) return;
@@ -55,6 +60,15 @@ pub const Canvas = struct {
         try self.rect(.{ .x = r.x, .y = r.y, .w = 1, .h = r.h }, color);
         try self.rect(.{ .x = r.x + r.w - 1, .y = r.y, .w = 1, .h = r.h }, color);
     }
+    pub fn icon(self: *Canvas, r: Rect, value: Icon, color: Color) !void {
+        const glyph = self.font.icon(value);
+        try self.quad(r, .{
+            .x = @as(f32, @floatFromInt(glyph.x)) / atlas_width,
+            .y = @as(f32, @floatFromInt(glyph.y)) / atlas_height,
+            .w = @as(f32, @floatFromInt(glyph.w)) / atlas_width,
+            .h = @as(f32, @floatFromInt(glyph.h)) / atlas_height,
+        }, color, 1);
+    }
     pub fn text(self: *Canvas, x: f32, y: f32, value: []const u8, size: f32, color: Color) !void {
         if (size <= 0) return;
         const strike = self.font.strike(size);
@@ -68,6 +82,7 @@ pub const Canvas = struct {
                 .{ .x = at + @as(f32, @floatFromInt(g.left)) * scale, .y = y + (strike.ascent - @as(f32, @floatFromInt(g.top))) * scale, .w = @as(f32, @floatFromInt(g.w)) * scale, .h = @as(f32, @floatFromInt(g.h)) * scale },
                 .{ .x = @as(f32, @floatFromInt(g.x)) / atlas_width, .y = @as(f32, @floatFromInt(g.y)) / atlas_height, .w = @as(f32, @floatFromInt(g.w)) / atlas_width, .h = @as(f32, @floatFromInt(g.h)) / atlas_height },
                 color,
+                1,
             );
             at += g.advance * scale;
         }
@@ -85,15 +100,18 @@ pub const Canvas = struct {
         try self.text(x, center.y - ink.y - ink.h / 2, value, size, color);
     }
     pub fn textWrappedIn(self: *Canvas, r: Rect, value: []const u8, size: f32, color: Color) !void {
+        return self.textWrappedInAligned(r, value, size, color, .start);
+    }
+    pub fn textWrappedInAligned(self: *Canvas, r: Rect, value: []const u8, size: f32, color: Color, alignment: TextAlign) !void {
         var iter = self.font.lines(value, size, r.w);
         var y = r.y;
         const line_height = size * 1.35;
         while (iter.next()) |line| {
-            try self.textIn(.{ .x = r.x, .y = y, .w = r.w, .h = line_height }, line, size, color, .start);
+            try self.textIn(.{ .x = r.x, .y = y, .w = r.w, .h = line_height }, line, size, color, alignment);
             y += line_height;
         }
     }
-    fn quad(self: *Canvas, r: Rect, uv: Rect, color: Color) !void {
+    fn quad(self: *Canvas, r: Rect, uv: Rect, color: Color, alpha: f32) !void {
         if (r.w <= 0 or r.h <= 0) return;
         const visible = if (self.clip) |clip| r.intersection(clip) else r;
         if (visible.w <= 0 or visible.h <= 0) return;
@@ -102,7 +120,7 @@ pub const Canvas = struct {
             if (self.srgb_target) types.linearChannel(color[0]) else color[0],
             if (self.srgb_target) types.linearChannel(color[1]) else color[1],
             if (self.srgb_target) types.linearChannel(color[2]) else color[2],
-            1,
+            alpha,
         };
         const u_start = uv.x + (visible.x - r.x) / r.w * uv.w;
         const v_start = uv.y + (visible.y - r.y) / r.h * uv.h;
@@ -152,6 +170,25 @@ test "text ink is centered in its rectangle" {
     try std.testing.expectApproxEqAbs(area.center().y, (top + bottom) / 2, 0.01);
 }
 
+test "start and end aligned ink meets the corresponding bounds" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 32);
+    defer font.deinit();
+    var vertices: [32]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    const area = Rect{ .x = 10, .y = 20, .w = 100, .h = 40 };
+    for ([_]Canvas.TextAlign{ .start, .end }) |alignment| {
+        canvas.len = 0;
+        try canvas.textIn(area, "AX", 16, .{ 1, 1, 1 }, alignment);
+        var left: f32 = std.math.inf(f32);
+        var right: f32 = -std.math.inf(f32);
+        for (canvas.items()) |vertex| {
+            left = @min(left, vertex.position[0]);
+            right = @max(right, vertex.position[0]);
+        }
+        try std.testing.expectApproxEqAbs(if (alignment == .start) area.x else area.x + area.w, if (alignment == .start) left else right, 0.01);
+    }
+}
+
 test "clip trims geometry to the viewport" {
     var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
     defer font.deinit();
@@ -163,6 +200,18 @@ test "clip trims geometry to the viewport" {
         try std.testing.expect(vertex.position[0] >= 10 and vertex.position[0] <= 30);
         try std.testing.expect(vertex.position[1] >= 10 and vertex.position[1] <= 30);
     }
+}
+
+test "Lucide icon vertices use the font atlas and clip to their box" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 32);
+    defer font.deinit();
+    var vertices: [6]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    canvas.clip = .{ .x = 12, .y = 12, .w = 8, .h = 8 };
+    try canvas.icon(.{ .x = 8, .y = 8, .w = 16, .h = 16 }, .check, .{ 1, 1, 1 });
+    try std.testing.expectEqual(@as(usize, 6), canvas.len);
+    try std.testing.expectEqual(@as(f32, 12), canvas.items()[0].position[0]);
+    try std.testing.expect(canvas.items()[0].uv[0] > 0);
 }
 
 test "solid rectangles snap to physical pixels without changing text vertices" {
@@ -200,4 +249,15 @@ test "sRGB target linearizes theme colors before framebuffer encoding" {
     canvas.srgb_target = true;
     try canvas.rect(.{ .x = 0, .y = 0, .w = 10, .h = 10 }, .{ 0.5, 0.5, 0.5 });
     try std.testing.expectApproxEqAbs(@as(f32, 0.214), canvas.items()[0].color[0], 0.001);
+}
+
+test "translucent backdrop retains alpha and rejects invalid opacity" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    defer font.deinit();
+    var vertices: [6]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    const area = Rect{ .x = 0, .y = 0, .w = 10, .h = 10 };
+    try canvas.rectAlpha(area, .{ 0, 0, 0 }, 0.4);
+    try std.testing.expectEqual(@as(f32, 0.4), canvas.items()[0].color[3]);
+    try std.testing.expectError(error.InvalidAlpha, canvas.rectAlpha(area, .{ 0, 0, 0 }, -1));
 }
