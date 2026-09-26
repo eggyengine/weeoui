@@ -31,6 +31,7 @@ pub const Paint = union(enum) {
     button: struct { label: []const u8, primary: bool = true, hot: bool, focused: bool },
     checkbox: struct { label: []const u8, checked: bool, focused: bool },
     toggle: struct { label: []const u8, enabled: bool, focused: bool },
+    slider: struct { value: f32, focused: bool },
     scrollbar: struct { state: *ScrollState, axis: ScrollState.Axis },
     custom: struct {
         context: *const anyopaque,
@@ -78,6 +79,7 @@ pub const Element = struct {
             .button => |b| try @import("components/button.zig").draw(c, self.bounds, b.label, b.primary, b.hot, b.focused),
             .checkbox => |b| try @import("components/checkbox.zig").draw(c, self.bounds, b.label, b.checked, b.focused),
             .toggle => |b| try @import("components/toggle.zig").draw(c, self.bounds, b.label, b.enabled, b.focused),
+            .slider => |s| try @import("components/slider.zig").draw(c, self.bounds, s.value, s.focused),
             .scrollbar => |bar| try bar.state.drawBar(c, bar.axis),
             .custom => |custom| try custom.draw(custom.context, c, self.bounds),
         }
