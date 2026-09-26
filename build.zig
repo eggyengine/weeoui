@@ -8,6 +8,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod }));
+    const freetype = b.dependency("freetype", .{ .target = target, .optimize = optimize });
+    mod.addImport("freetype", freetype.module("freetype"));
+    mod.linkLibrary(freetype.artifact("freetype"));
+    const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod, .use_llvm = true }));
     b.step("test", "Check Weeoui module").dependOn(&tests.step);
 }

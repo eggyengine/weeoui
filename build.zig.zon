@@ -2,6 +2,12 @@
     .name = .weeoui,
     .version = "0.0.1",
     .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .freetype = .{
+            .url = "git+https://github.com/allyourcodebase/freetype#884fd2235e6ae1ec4306eda30b3259f20930ed2e",
+            .hash = "freetype-2.14.3-C3-WdXSKAAB-kHs4qgRoeoFnRkNQn6M_SSlUGZ6ywgBQ",
+        },
+    },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
     .fingerprint = 0xdf62bb844157c203,
 }
