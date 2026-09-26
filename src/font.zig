@@ -1,6 +1,7 @@
 //! FreeType rasterization into a compact grayscale atlas.
 const std = @import("std");
 const c = @import("freetype").c;
+const Rect = @import("types.zig").Rect;
 
 pub const atlas_width = 512;
 pub const atlas_height = 512;
@@ -90,6 +91,30 @@ pub const Font = struct {
             width += self.glyph(byte).advance * size / self.size;
         }
         return width;
+    }
+    /// Visible glyph bounds relative to Canvas.text's origin.
+    pub fn inkBounds(self: *const Font, value: []const u8, size: f32) Rect {
+        const scale = size / self.size;
+        var pen: f32 = 0;
+        var left: f32 = std.math.inf(f32);
+        var top: f32 = std.math.inf(f32);
+        var right: f32 = -std.math.inf(f32);
+        var bottom: f32 = -std.math.inf(f32);
+        for (value) |byte| {
+            if (byte & 0xc0 == 0x80) continue;
+            const g = self.glyph(byte);
+            if (g.w > 0 and g.h > 0) {
+                const x = pen + @as(f32, @floatFromInt(g.left)) * scale;
+                const y = (self.ascent - @as(f32, @floatFromInt(g.top))) * scale;
+                left = @min(left, x);
+                top = @min(top, y);
+                right = @max(right, x + @as(f32, @floatFromInt(g.w)) * scale);
+                bottom = @max(bottom, y + @as(f32, @floatFromInt(g.h)) * scale);
+            }
+            pen += g.advance * scale;
+        }
+        if (left == std.math.inf(f32)) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        return .{ .x = left, .y = top, .w = right - left, .h = bottom - top };
     }
 };
 

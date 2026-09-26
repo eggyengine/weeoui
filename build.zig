@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const freetype = b.dependency("freetype", .{ .target = target, .optimize = optimize });
+    const eggenvector = b.dependency("eggenvector", .{ .target = target, .optimize = optimize });
+    mod.addImport("eggenvector", eggenvector.module("eggenvector"));
     mod.addImport("freetype", freetype.module("freetype"));
     mod.linkLibrary(freetype.artifact("freetype"));
     const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod, .use_llvm = true }));

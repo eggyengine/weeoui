@@ -45,6 +45,18 @@ pub const Canvas = struct {
             at += g.advance * scale;
         }
     }
+    pub const TextAlign = enum { start, center, end };
+    /// Align visible ink within a rectangle; all components share the same vertical center.
+    pub fn textIn(self: *Canvas, r: Rect, value: []const u8, size: f32, color: Color, alignment: TextAlign) !void {
+        const ink = self.font.inkBounds(value, size);
+        const center = r.center();
+        const x = switch (alignment) {
+            .start => r.x - ink.x,
+            .center => center.x - ink.x - ink.w / 2,
+            .end => r.x + r.w - ink.x - ink.w,
+        };
+        try self.text(x, center.y - ink.y - ink.h / 2, value, size, color);
+    }
     fn quad(self: *Canvas, r: Rect, uv: Rect, color: Color) !void {
         if (r.w <= 0 or r.h <= 0) return;
         if (self.len + 6 > self.vertices.len) return error.OutOfVertices;
@@ -70,4 +82,25 @@ test "rectangle hit testing and geometry" {
     try canvas.rect(r, .{ 1, 1, 1 });
     try std.testing.expectEqual(@as(usize, 6), canvas.items().len);
     try std.testing.expectError(error.OutOfVertices, canvas.rect(r, .{ 1, 1, 1 }));
+}
+
+test "text ink is centered in its rectangle" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 32);
+    defer font.deinit();
+    var vertices: [32]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    const area = Rect{ .x = 10, .y = 20, .w = 100, .h = 40 };
+    try canvas.textIn(area, "AX", 16, .{ 1, 1, 1 }, .center);
+    var left: f32 = std.math.inf(f32);
+    var top: f32 = std.math.inf(f32);
+    var right: f32 = -std.math.inf(f32);
+    var bottom: f32 = -std.math.inf(f32);
+    for (canvas.items()) |vertex| {
+        left = @min(left, vertex.position[0]);
+        top = @min(top, vertex.position[1]);
+        right = @max(right, vertex.position[0]);
+        bottom = @max(bottom, vertex.position[1]);
+    }
+    try std.testing.expectApproxEqAbs(area.center().x, (left + right) / 2, 0.01);
+    try std.testing.expectApproxEqAbs(area.center().y, (top + bottom) / 2, 0.01);
 }

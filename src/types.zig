@@ -1,10 +1,14 @@
 pub const Color = [3]f32;
+pub const Vec2 = @import("eggenvector").Vec2;
 pub const Vertex = extern struct { position: [2]f32, color: [4]f32, uv: [2]f32 };
 pub const Rect = struct {
     x: f32,
     y: f32,
     w: f32,
     h: f32,
+    pub fn center(self: Rect) Vec2 {
+        return Vec2.init(self.x, self.y).add(Vec2.init(self.w, self.h).scale(0.5));
+    }
     pub fn contains(self: Rect, x: f32, y: f32) bool {
         return x >= self.x and y >= self.y and x < self.x + self.w and y < self.y + self.h;
     }
