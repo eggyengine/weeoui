@@ -20,6 +20,12 @@ pub const ScrollState = struct {
     following_messages: bool = false,
     messages_initialized: bool = false,
     pending_prepend: f32 = 0,
+    /// Paint a vertical bar over the viewport's right edge, shown only after recent scrolling.
+    overlay_bar: bool = false,
+    /// Seconds the overlay bar stays visible; refreshed by scrolling, drained by `tick`.
+    recent: f32 = 0,
+    pub const recent_seconds: f32 = 1.2;
+    const overlay_width: f32 = 10;
 
     pub fn clamp(self: *ScrollState) void {
         self.offset.x = std.math.clamp(self.offset.x, 0, @max(0, self.content.x - self.viewport.w));
@@ -32,11 +38,13 @@ pub const ScrollState = struct {
         self.offset.x -= dx * 40;
         self.offset.y -= dy * 40;
         self.clamp();
+        self.recent = recent_seconds;
         if (self.message_mode and self.auto_scroll and dy < 0 and self.atMessageEnd()) self.following_messages = true;
     }
     pub fn updateLayout(self: *ScrollState, viewport: Rect, content: Vec2) void {
         self.viewport = viewport;
         self.content = content;
+        if (self.overlay_bar) self.vertical_bar = .{ .x = viewport.x + viewport.w - overlay_width, .y = viewport.y, .w = overlay_width, .h = viewport.h };
         if (self.message_mode) {
             if (content.y == 0) {
                 self.offset.y = 0;
@@ -88,7 +96,14 @@ pub const ScrollState = struct {
         const w = @min(track, @max(24, track * self.viewport.w / self.content.x));
         return .{ .x = self.horizontal_bar.x + 4 + (track - w) * self.offset.x / @max(1, self.content.x - self.viewport.w), .y = self.horizontal_bar.y + (self.horizontal_bar.h - 6) / 2, .w = w, .h = 6 };
     }
+    pub fn tick(self: *ScrollState, dt: f32) void {
+        self.recent = @max(0, self.recent - dt);
+    }
+    pub fn barVisible(self: *const ScrollState) bool {
+        return !self.overlay_bar or self.recent > 0 or self.dragging != .none;
+    }
     pub fn pointerDown(self: *ScrollState, x: f32, y: f32) bool {
+        if (!self.barVisible()) return false;
         if (self.vertical_bar.h >= 16 and self.content.y > self.viewport.h and self.verticalThumb().contains(x, y)) {
             if (self.message_mode) self.following_messages = false;
             self.dragging = .vertical;
@@ -115,12 +130,14 @@ pub const ScrollState = struct {
             .none => return,
         }
         self.clamp();
+        self.recent = recent_seconds;
         if (self.message_mode and self.auto_scroll and self.dragging == .vertical and self.atMessageEnd()) self.following_messages = true;
     }
     pub fn pointerUp(self: *ScrollState) void {
         self.dragging = .none;
     }
     pub fn drawBar(self: *const ScrollState, c: *Canvas, axis: Axis) !void {
+        if (!self.barVisible()) return;
         if (axis == .vertical and self.vertical_bar.h >= 16 and self.content.y > self.viewport.h) {
             try c.rect(.{ .x = self.vertical_bar.x + (self.vertical_bar.w - 6) / 2, .y = self.vertical_bar.y + 4, .w = 6, .h = self.vertical_bar.h - 8 }, c.theme.border);
             try c.roundRect(self.verticalThumb(), c.theme.muted_foreground, @min(c.theme.radiusSm(), 3));
@@ -175,6 +192,23 @@ test "message scroller restores prepends, deferred content, and start position" 
     try std.testing.expect(!state.messages_initialized);
     state.updateLayout(viewport, Vec2.init(100, 260));
     try std.testing.expectEqual(@as(f32, 0), state.offset.y);
+}
+
+test "overlay bar is usable only after recent scrolling" {
+    var scroll = ScrollState{ .overlay_bar = true };
+    scroll.updateLayout(.{ .x = 0, .y = 0, .w = 100, .h = 100 }, Vec2.init(100, 300));
+    const thumb = scroll.verticalThumb();
+    try std.testing.expect(!scroll.pointerDown(thumb.x + 2, thumb.y + 2));
+    scroll.wheel(0, -1);
+    try std.testing.expect(scroll.barVisible());
+    scroll.tick(ScrollState.recent_seconds);
+    try std.testing.expect(!scroll.barVisible());
+    scroll.wheel(0, 1);
+    try std.testing.expect(scroll.pointerDown(thumb.x + 2, thumb.y + 2));
+    scroll.tick(ScrollState.recent_seconds);
+    try std.testing.expect(scroll.barVisible());
+    scroll.pointerUp();
+    try std.testing.expect(!scroll.barVisible());
 }
 
 test "scrollbar thumb drags through content range" {

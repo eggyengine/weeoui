@@ -174,6 +174,7 @@ pub fn scrollArea(b: L.Builder, viewport: Rect, state: *L.ScrollState, children:
     if (!std.math.isFinite(viewport.w) or !std.math.isFinite(viewport.h) or viewport.w <= 0 or viewport.h <= 0) return error.InvalidSize;
     const result = try b.node(0, .{ .width = viewport.w, .height = viewport.h, .overflow = .scroll }, .none, children);
     result.scroll = state;
+    state.overlay_bar = true;
     return result;
 }
 

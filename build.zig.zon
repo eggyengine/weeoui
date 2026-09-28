@@ -11,7 +11,21 @@
             .url = "git+https://github.com/allyourcodebase/freetype#884fd2235e6ae1ec4306eda30b3259f20930ed2e",
             .hash = "freetype-2.14.3-C3-WdXSKAAB-kHs4qgRoeoFnRkNQn6M_SSlUGZ6ywgBQ",
         },
+        .sdl3 = .{
+            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=v0.2.2#83c694024f23cbacfa36fcd8fca1c57d4957203e",
+            .hash = "sdl3-0.2.2-NmT1Q-2jKQBa4uSXUwuVwdmXpXe-eYwim7Wkyx531v6O",
+            .lazy = true,
+        },
+        .vitellus = .{
+            .url = "git+https://github.com/eggyengine/vitellus#9ee2cee3bb55b2545b6b167a9890319559813749",
+            .hash = "vitellus-0.1.0-JC2CjGPDCQDlF2tnM4zZ5xo9GkgYDnfA9nkXsbtMv8b5",
+            .lazy = true,
+        },
+        .accesskit_c = .{
+            .url = "https://github.com/AccessKit/accesskit-c/releases/download/0.23.0/accesskit-c-0.23.0.zip",
+            .hash = "N-V-__8AAEFGZhErLHq9UH3Pw21WPLBLfjYaqLIboPjbQHTB",
+        },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "examples" },
     .fingerprint = 0xdf62bb844157c203,
 }

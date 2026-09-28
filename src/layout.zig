@@ -266,6 +266,10 @@ pub const Element = struct {
             .custom => |custom| try custom.draw(custom.context, c, self.bounds),
         }
         for (0..self.children.len) |i| try self.paintChild(i).drawBase(c, skip_overlays);
+        if (self.scroll) |scroll| if (scroll.overlay_bar) {
+            c.clip = self.clip.intersection(self.bounds);
+            try scroll.drawBar(c, .vertical);
+        };
     }
 };
 
