@@ -4,8 +4,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .eggenvector = .{
-            .url = "git+https://github.com/eggyengine/eggenvector#49046e371a8791ed3483e80326d779eedd0c181e",
-            .hash = "eggenvector-0.0.0-UyZb9C7sAQBBRR526yoYPHubwq9etR7eLFT5chA31KkX",
+            .url = "git+https://github.com/eggyengine/eggenvector#0090788fd2de5151577ae15000bd0f954f51e0ed",
+            .hash = "eggenvector-0.0.0-UyZb9CMkAgCXysMEx0f2nRlTRCMzRwo32F1vsDULsLYV",
         },
         .freetype = .{
             .url = "git+https://github.com/allyourcodebase/freetype#884fd2235e6ae1ec4306eda30b3259f20930ed2e",
