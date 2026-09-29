@@ -167,6 +167,7 @@ fn modifiers(mod: sdl3.keycode.KeyModifier) ui.input.Modifiers {
 
 fn key(code: sdl3.keycode.Keycode) ?ui.input.Key {
     if (code == .return_key or code == .kp_enter) return .enter;
+    if (code == .func12) return .f12;
     inline for (@typeInfo(ui.input.Key).@"enum".fields) |field| {
         if (comptime @hasField(sdl3.keycode.Keycode, field.name)) {
             if (code == @field(sdl3.keycode.Keycode, field.name)) return @field(ui.input.Key, field.name);

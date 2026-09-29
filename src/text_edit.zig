@@ -202,6 +202,18 @@ pub fn TextEdit(comptime capacity: usize) type {
             try self.replace(self.selection() orelse .{ .start = self.cursor, .end = self.cursor }, value);
         }
 
+        /// Like `insert`, but keeps the longest whole-character prefix that fits (as a
+        /// `maxlength` field does with a paste). Returns whether `value` was cut short.
+        pub fn insertFitting(self: *Self, value: []const u8) Error!bool {
+            if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+            const range = self.selection() orelse Range{ .start = self.cursor, .end = self.cursor };
+            const room = capacity - (self.len - (range.end - range.start));
+            var fit = @min(room, value.len);
+            while (fit > 0 and fit < value.len and !isBoundary(value, fit)) fit -= 1;
+            try self.replace(range, value[0..fit]);
+            return fit < value.len;
+        }
+
         pub fn backspace(self: *Self) void {
             const range = self.selection() orelse if (self.cursor > 0)
                 Range{ .start = previous(self.text(), self.cursor), .end = self.cursor }
@@ -537,6 +549,11 @@ test "UTF-8 insertion, selection replacement, deletion and atomic errors" {
     try std.testing.expectEqualStrings("ab", edit.text());
     var full = try TextEdit(4).init("aéb");
     try std.testing.expectError(error.Full, full.insert("z"));
+    var small = TextEdit(5).init("ab") catch unreachable;
+    try std.testing.expect(try small.insertFitting("c\u{e9}d")); // "c" + 2-byte é fits, "d" does not
+    try std.testing.expectEqualStrings("abc\u{e9}", small.text());
+    var roomy = TextEdit(8).init("") catch unreachable;
+    try std.testing.expect(!try roomy.insertFitting("ok"));
     try std.testing.expectEqualStrings("aéb", full.text());
     try std.testing.expectEqual(@as(usize, 4), full.cursor);
     try std.testing.expect(!full.undo());

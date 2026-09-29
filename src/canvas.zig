@@ -155,6 +155,59 @@ pub const Canvas = struct {
             y += line_height;
         }
     }
+    /// Flat-textured triangle with a color (sRGB + alpha) per corner, interpolated across it.
+    /// Clipped exactly to `clip`, so gradients and wheels can sit inside scroll areas.
+    pub fn triangle(self: *Canvas, points: [3][2]f32, colors: [3][4]f32) !void {
+        const Point = struct { p: [2]f32, c: [4]f32 };
+        var polygon: [9]Point = undefined;
+        var count: usize = 3;
+        for (0..3) |i| polygon[i] = .{ .p = points[i], .c = colors[i] };
+        if (self.clip) |clip| {
+            // Sutherland-Hodgman against the four clip edges: axis, sign, bound.
+            const planes = [_]struct { axis: usize, sign: f32, at: f32 }{
+                .{ .axis = 0, .sign = 1, .at = clip.x },
+                .{ .axis = 0, .sign = -1, .at = clip.x + clip.w },
+                .{ .axis = 1, .sign = 1, .at = clip.y },
+                .{ .axis = 1, .sign = -1, .at = clip.y + clip.h },
+            };
+            for (planes) |plane| {
+                var out: [9]Point = undefined;
+                var n: usize = 0;
+                for (0..count) |i| {
+                    const a = polygon[i];
+                    const b = polygon[(i + 1) % count];
+                    const da = (a.p[plane.axis] - plane.at) * plane.sign;
+                    const db = (b.p[plane.axis] - plane.at) * plane.sign;
+                    if (da >= 0) {
+                        out[n] = a;
+                        n += 1;
+                    }
+                    if ((da >= 0) != (db >= 0) and n < out.len) {
+                        const t = da / (da - db);
+                        var mid: Point = undefined;
+                        for (0..2) |k| mid.p[k] = a.p[k] + (b.p[k] - a.p[k]) * t;
+                        for (0..4) |k| mid.c[k] = a.c[k] + (b.c[k] - a.c[k]) * t;
+                        out[n] = mid;
+                        n += 1;
+                    }
+                }
+                polygon = out;
+                count = n;
+                if (count < 3) return;
+            }
+        }
+        if (self.len + (count - 2) * 3 > self.vertices.len) return error.OutOfVertices;
+        const uv = [2]f32{ solid_uv.x, solid_uv.y };
+        for (1..count - 1) |i| for ([_]usize{ 0, i, i + 1 }) |j| {
+            const c = polygon[j].c;
+            self.vertices[self.len] = .{
+                .position = polygon[j].p,
+                .color = if (self.srgb_target) .{ types.linearChannel(c[0]), types.linearChannel(c[1]), types.linearChannel(c[2]), c[3] } else c,
+                .uv = uv,
+            };
+            self.len += 1;
+        };
+    }
     const solid_uv = Rect{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 };
     fn quad(self: *Canvas, r: Rect, uv: Rect, color: Color, alpha: f32, mode: f32) !void {
         if (r.w <= 0 or r.h <= 0) return;
@@ -320,4 +373,22 @@ test "translucent backdrop retains alpha and rejects invalid opacity" {
     try canvas.rectAlpha(area, .{ 0, 0, 0 }, 0.4);
     try std.testing.expectEqual(@as(f32, 0.4), canvas.items()[0].color[3]);
     try std.testing.expectError(error.InvalidAlpha, canvas.rectAlpha(area, .{ 0, 0, 0 }, -1));
+}
+
+test "gradient triangles clip exactly and interpolate corner colors" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var vertices: [32]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    canvas.clip = .{ .x = 0, .y = 0, .w = 10, .h = 10 };
+    try canvas.triangle(.{ .{ -10, 5 }, .{ 20, 5 }, .{ 5, 20 } }, .{ .{ 1, 0, 0, 1 }, .{ 0, 0, 1, 1 }, .{ 0, 1, 0, 1 } });
+    try std.testing.expect(canvas.len >= 3 and canvas.len % 3 == 0);
+    for (canvas.items()) |v| {
+        try std.testing.expect(v.position[0] >= 0 and v.position[0] <= 10 and v.position[1] >= 0 and v.position[1] <= 10);
+        // Where the left edge crosses x = 0, red has faded a third of the way toward blue.
+        if (v.position[0] == 0 and v.position[1] == 5) try std.testing.expectApproxEqAbs(@as(f32, 2.0 / 3.0), v.color[0], 0.001);
+    }
+    canvas.len = 0;
+    try canvas.triangle(.{ .{ 20, 20 }, .{ 30, 20 }, .{ 25, 30 } }, .{ .{ 1, 1, 1, 1 }, .{ 1, 1, 1, 1 }, .{ 1, 1, 1, 1 } });
+    try std.testing.expectEqual(@as(usize, 0), canvas.len);
 }

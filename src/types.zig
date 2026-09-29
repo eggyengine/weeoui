@@ -26,6 +26,63 @@ pub const Rect = struct {
     }
 };
 
+/// Hue, saturation and value, each 0..1.
+pub const Hsv = struct {
+    h: f32 = 0,
+    s: f32 = 1,
+    v: f32 = 1,
+
+    pub fn toRgb(self: Hsv) Color {
+        const h = @mod(self.h, 1) * 6;
+        const sector: u3 = @intFromFloat(@min(5, @floor(h)));
+        const f = h - @floor(h);
+        const v = self.v;
+        const p = v * (1 - self.s);
+        const q = v * (1 - self.s * f);
+        const t = v * (1 - self.s * (1 - f));
+        return switch (sector) {
+            0 => .{ v, t, p },
+            1 => .{ q, v, p },
+            2 => .{ p, v, t },
+            3 => .{ p, q, v },
+            4 => .{ t, p, v },
+            else => .{ v, p, q },
+        };
+    }
+    /// `keep_hue` survives greys and black, where hue is undefined.
+    pub fn fromRgb(c: Color, keep_hue: f32) Hsv {
+        const max = @max(c[0], @max(c[1], c[2]));
+        const min = @min(c[0], @min(c[1], c[2]));
+        const d = max - min;
+        var h = keep_hue;
+        if (d > 1e-6) {
+            h = if (max == c[0]) @mod((c[1] - c[2]) / d, 6) / 6 else if (max == c[1]) ((c[2] - c[0]) / d + 2) / 6 else ((c[0] - c[1]) / d + 4) / 6;
+        }
+        return .{ .h = h, .s = if (max > 0) d / max else 0, .v = max };
+    }
+};
+
+/// Parse "#rrggbb", "rrggbb" or "#rgb".
+pub fn parseHex(text: []const u8) !Color {
+    const digits = std.mem.trim(u8, std.mem.trimStart(u8, std.mem.trim(u8, text, " \t"), "#"), " \t");
+    var bytes: [3]u8 = undefined;
+    switch (digits.len) {
+        6 => _ = std.fmt.hexToBytes(&bytes, digits) catch return error.InvalidColor,
+        3 => for (&bytes, digits) |*byte, digit| {
+            byte.* = (std.fmt.charToDigit(digit, 16) catch return error.InvalidColor) * 17;
+        },
+        else => return error.InvalidColor,
+    }
+    return rgb(bytes[0], bytes[1], bytes[2]);
+}
+
+/// "#RRGGBB" into `buffer`.
+pub fn formatHex(buffer: *[7]u8, c: Color) []const u8 {
+    var bytes: [3]u8 = undefined;
+    for (&bytes, c) |*byte, channel| byte.* = @intFromFloat(@round(std.math.clamp(channel, 0, 1) * 255));
+    return std.fmt.bufPrint(buffer, "#{X:0>2}{X:0>2}{X:0>2}", .{ bytes[0], bytes[1], bytes[2] }) catch unreachable;
+}
+
 /// Near-black or white, whichever reads better on `fill`.
 pub fn onColor(fill: Color) Color {
     const luma = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2];
@@ -54,7 +111,7 @@ pub fn oklch(L: f32, C: f32, H: f32) Color {
     };
 }
 
-fn srgbChannel(linear: f32) f32 {
+pub fn srgbChannel(linear: f32) f32 {
     const c = std.math.clamp(linear, 0, 1);
     return if (c <= 0.0031308) 12.92 * c else 1.055 * @exp(@log(c) / 2.4) - 0.055;
 }
@@ -122,6 +179,21 @@ pub const Theme = struct {
         return self.radius * 1.4;
     }
 };
+
+test "hsv and hex round-trip and greys keep their hue" {
+    const orange = rgb(0xF2, 0xB2, 0x33);
+    const hsv = Hsv.fromRgb(orange, 0);
+    const back = hsv.toRgb();
+    for (orange, back) |a, b| try std.testing.expectApproxEqAbs(a, b, 0.002);
+    var buffer: [7]u8 = undefined;
+    try std.testing.expectEqualStrings("#F2B233", formatHex(&buffer, back));
+    try std.testing.expectEqual(orange, try parseHex(" #f2b233 "));
+    try std.testing.expectEqual(rgb(0xff, 0x00, 0x88), try parseHex("f08"));
+    try std.testing.expectError(error.InvalidColor, parseHex("#12345"));
+    try std.testing.expectError(error.InvalidColor, parseHex("#zzzzzz"));
+    try std.testing.expectEqual(@as(f32, 0.3), Hsv.fromRgb(.{ 0.5, 0.5, 0.5 }, 0.3).h);
+    try std.testing.expectEqual(Color{ 1, 0, 0 }, (Hsv{ .h = 1 }).toRgb());
+}
 
 test "oklch maps shadcn white and near-black" {
     const white = oklch(1, 0, 0);

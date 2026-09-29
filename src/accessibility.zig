@@ -103,6 +103,8 @@ fn append(allocator: std.mem.Allocator, nodes: *std.ArrayList(Node), ids: *std.A
             if (value.indicator != .none and value.indicator != .inset) node.toggled = value.indicator == .checked or value.indicator == .radio_on;
         },
         .disclosure => |value| node.expanded = value.open,
+        .color_wheel => |editor| node.numeric_value = editor.hsv.h,
+        .color_channel => |slider| node.numeric_value = slider.editor.get(slider.channel),
         .slider => |value| {
             if (!std.math.isFinite(value.value) or value.value < 0 or value.value > 1) return error.InvalidValue;
             node.numeric_value = value.value;
@@ -130,7 +132,8 @@ fn roleFor(paint: L.Paint) Role {
         .menu_item => .menu_item,
         .checkbox => .checkbox,
         .toggle => .switch_control,
-        .slider => .slider,
+        .slider, .color_wheel, .color_channel => .slider,
+        .swatch => .image,
         .input => .input,
         .radio => .radio,
         .progress => .progress,

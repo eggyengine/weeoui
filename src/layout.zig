@@ -7,6 +7,7 @@ const Font = @import("font.zig").Font;
 const Icon = @import("font.zig").Icon;
 const Canvas = @import("canvas.zig").Canvas;
 const primitives = @import("components/primitives.zig");
+const ColorEditor = @import("components/color_editor.zig").ColorEditor;
 
 pub const Insets = struct { left: f32 = 0, right: f32 = 0, top: f32 = 0, bottom: f32 = 0 };
 pub const Style = struct {
@@ -68,6 +69,9 @@ pub const Paint = union(enum) {
     bubble: primitives.Bubble,
     /// Accent background while the pointer is over this element (links, list rows).
     hover,
+    color_wheel: ColorEditor,
+    color_channel: struct { editor: ColorEditor, channel: @import("components/color_editor.zig").Channel, label: []const u8 = "" },
+    swatch: struct { color: types.Color, alpha: f32 = 1 },
     backdrop,
     custom: struct {
         context: *const anyopaque,
@@ -127,7 +131,7 @@ pub const Element = struct {
             .menu_item => |item| if (item.heading) return false else Accessibility.Role.menu_item,
             .checkbox => Accessibility.Role.checkbox,
             .toggle => Accessibility.Role.switch_control,
-            .slider => Accessibility.Role.slider,
+            .slider, .color_wheel, .color_channel => Accessibility.Role.slider,
             .input => Accessibility.Role.input,
             .tab => Accessibility.Role.tab,
             else => return false,
@@ -319,6 +323,9 @@ pub const Element = struct {
                 c.theme.foreground = primitives.bubbleForeground(c.theme, variant);
             },
             .hover => if (self.id != 0 and self.id == c.hot_id) try c.roundRect(self.bounds, c.theme.accent, c.theme.radiusMd()),
+            .color_wheel => |editor| try @import("components/color_editor.zig").drawWheel(c, self.bounds, editor),
+            .color_channel => |slider| try @import("components/color_editor.zig").drawChannel(c, self.bounds, slider.editor, slider.channel, slider.label),
+            .swatch => |swatch| try @import("components/color_editor.zig").drawSwatch(c, self.bounds, swatch.color, swatch.alpha),
             .backdrop => try c.rectAlpha(self.bounds, .{ 0, 0, 0 }, 0.45),
             .custom => |custom| try custom.draw(custom.context, c, self.bounds),
         }
@@ -332,7 +339,7 @@ pub const Element = struct {
         // After the children so the ring stays visible on any background.
         if (self.id != 0 and self.id == c.focus_id) {
             const round = switch (self.paint_kind) {
-                .radio, .avatar, .spinner => @min(self.bounds.w, self.bounds.h) / 2,
+                .radio, .avatar, .spinner, .color_wheel => @min(self.bounds.w, self.bounds.h) / 2,
                 else => c.theme.radiusMd(),
             };
             try primitives.focusRing(c, self.bounds, round, c.theme.ring);
@@ -508,6 +515,7 @@ fn naturalWidth(node: *Element, font: *const Font) f32 {
         .badge => |b| width = font.measure(b.label, 13) + 20,
         .menu_item => |item| width = font.measure(item.label, 14) + font.measure(item.shortcut, 13) + 64,
         .toggle_button => |t| width = font.measure(t.label, 14) + 24,
+        .tab => |t| width = font.measure(t.label, 14) + 24,
         else => {},
     }
     const result = widthFor(node.style, @max(node.style.min_width, width + node.style.padding.left + node.style.padding.right));

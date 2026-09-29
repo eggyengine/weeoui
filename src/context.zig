@@ -79,7 +79,8 @@ pub const Context = struct {
             },
             .pointer_up => |up| self.pointer = up.position,
             .key_down => |key| switch (key.key) {
-                .tab => if (!key.repeat) {
+                // Repeats count too, so holding Tab keeps moving focus.
+                .tab => {
                     self.tab_moves += if (key.modifiers.shift) -1 else 1;
                     self.focus_visible = true;
                 },
@@ -334,6 +335,11 @@ test "tab and shift+tab cycle focus; enter activates the focused widget" {
     try std.testing.expectEqual(checkbox_id, ctx.focus);
     try std.testing.expect(hints);
 
+    // A held Tab (repeat events) keeps moving: two steps from the checkbox wrap back to it.
+    ctx.handle(.{ .key_down = .{ .key = .tab, .modifiers = .{}, .repeat = true } });
+    ctx.handle(.{ .key_down = .{ .key = .tab, .modifiers = .{}, .repeat = true } });
+    try Frame.run(&ctx, viewport, &count, &hints);
+    try std.testing.expectEqual(checkbox_id, ctx.focus);
     ctx.handle(tab); // wraps to the first widget
     try Frame.run(&ctx, viewport, &count, &hints);
     try std.testing.expectEqual(button_id, ctx.focus);

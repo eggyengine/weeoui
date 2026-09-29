@@ -45,6 +45,7 @@ pub const Key = enum {
     x,
     y,
     z,
+    f12,
 };
 pub const Modifiers = packed struct {
     shift: bool = false,

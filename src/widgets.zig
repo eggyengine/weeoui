@@ -571,12 +571,13 @@ fn tableRow(b: L.Builder, values: []const []const u8, header: bool) !*L.Element 
     const cells = try b.allocator.alloc(*L.Element, values.len);
     defer b.allocator.free(cells);
     for (values, 0..) |value, i| {
-        cells[i] = try b.node(0, .{ .min_width = 96, .grow = 1, .height = 36, .padding = .{ .left = 12, .right = 12 } }, .{
+        cells[i] = try b.node(0, .{ .height = 36, .padding = .{ .left = 12, .right = 12 } }, .{
             .text = .{ .value = value, .size = 14, .tone = if (header) .muted else .foreground },
         }, &.{});
         cells[i].accessibility.role = if (header) .column_header else .cell;
     }
-    const row = try b.node(0, .{ .direction = .row }, .none, cells);
+    // Equal grid columns keep every row's cells lined up under their headers.
+    const row = try b.node(0, .{ .columns = @intCast(values.len) }, .none, cells);
     row.accessibility.role = .row;
     return row;
 }
@@ -921,6 +922,190 @@ pub fn questionnaire(b: L.Builder, first_id: u32, question: Question, index: usi
     return result;
 }
 
+const color_editor = @import("components/color_editor.zig");
+
+/// Unreal-style color editor. Ids from `first_id`: +0 wheel, +1/+2 saturation/value bars,
+/// +3..+6 R G B A, +7..+9 H S V (see `ColorChannel`), +10 hex linear, +11 hex sRGB, +12 OK,
+/// +13 Cancel, +14 the Old swatch (restores), +15.. `swatches`. Route presses on the channel
+/// ids to `editor.press(channel, bounds, x, y)`, moves to `dragTo`, and release to `release`.
+pub fn colorEditor(b: L.Builder, first_id: u32, editor: color_editor.ColorEditor, hex_linear: primitives.Input, hex_srgb: primitives.Input, swatches: []const @import("types.zig").Color) !*L.Element {
+    const wheel = try b.node(first_id, .{ .width = 180, .height = 180 }, .{ .color_wheel = editor }, &.{});
+    wheel.accessibility = .{ .role = .slider, .label = "Hue and saturation", .description = "Left and right change hue, up and down saturation" };
+    const bar = struct {
+        fn make(builder: L.Builder, id: u32, e: color_editor.ColorEditor, channel: color_editor.Channel, name: []const u8) !*L.Element {
+            const node = try builder.node(id, .{ .width = 16, .height = 180 }, .{ .color_channel = .{ .editor = e, .channel = channel } }, &.{});
+            node.accessibility = .{ .role = .slider, .label = name };
+            return node;
+        }
+    }.make;
+    const slider = struct {
+        fn make(builder: L.Builder, id: u32, e: color_editor.ColorEditor, channel: color_editor.Channel, text: []const u8, name: []const u8) !*L.Element {
+            const node = try builder.node(id, .{ .height = 22 }, .{ .color_channel = .{ .editor = e, .channel = channel, .label = text } }, &.{});
+            node.accessibility = .{ .role = .slider, .label = name };
+            return node;
+        }
+    }.make;
+    const caption = struct {
+        fn make(builder: L.Builder, text: []const u8) !*L.Element {
+            return builder.node(0, .{}, .{ .text = .{ .value = text, .size = 12, .tone = .muted } }, &.{});
+        }
+    }.make;
+    const old = try b.node(first_id + 14, .{ .height = 40 }, .{ .swatch = .{ .color = editor.original.toRgb(), .alpha = editor.original_alpha } }, &.{});
+    old.accessibility = .{ .role = .button, .label = "Old color", .description = "Restore the color you started with" };
+    const new = try b.node(0, .{ .height = 40 }, .{ .swatch = .{ .color = editor.rgb(), .alpha = editor.alpha } }, &.{});
+    new.accessibility = .{ .role = .image, .label = "New color" };
+    var linear_opts = hex_linear;
+    linear_opts.placeholder = "RRGGBBAA";
+    var srgb_opts = hex_srgb;
+    srgb_opts.placeholder = "RRGGBBAA";
+    const linear_input = try b.node(first_id + 10, .{ .grow = 1, .height = 32 }, .{ .input = linear_opts }, &.{});
+    linear_input.accessibility.label = "Hex linear";
+    const srgb_input = try b.node(first_id + 11, .{ .grow = 1, .height = 32 }, .{ .input = srgb_opts }, &.{});
+    srgb_input.accessibility.label = "Hex sRGB";
+    const chips = try b.allocator.alloc(*L.Element, swatches.len);
+    defer b.allocator.free(chips);
+    for (swatches, chips, 0..) |color, *chip, i| {
+        const name = try b.allocator.create([7]u8);
+        chip.* = try b.node(first_id + 15 + @as(u32, @intCast(i)), .{ .width = 22, .height = 22 }, .{ .swatch = .{ .color = color } }, &.{});
+        chip.*.accessibility = .{ .role = .button, .label = @import("types.zig").formatHex(name, color) };
+    }
+    const values = try b.node(0, .{ .width = 250, .gap = 6 }, .none, &.{
+        try b.node(0, .{ .direction = .row }, .none, &.{
+            try b.node(0, .{ .grow = 1, .gap = 2 }, .none, &.{ try caption(b, "Old"), old }),
+            try b.node(0, .{ .grow = 1, .gap = 2 }, .none, &.{ try caption(b, "New"), new }),
+        }),
+        try slider(b, first_id + 3, editor, .red, "R", "Red"),
+        try slider(b, first_id + 4, editor, .green, "G", "Green"),
+        try slider(b, first_id + 5, editor, .blue, "B", "Blue"),
+        try slider(b, first_id + 6, editor, .alpha, "A", "Alpha"),
+        try slider(b, first_id + 7, editor, .hue, "H", "Hue"),
+        try slider(b, first_id + 8, editor, .sat, "S", "Saturation"),
+        try slider(b, first_id + 9, editor, .val, "V", "Value"),
+        try b.node(0, .{ .direction = .row, .gap = 8, .align_items = .center }, .none, &.{ try b.node(0, .{ .width = 64 }, .{ .text = .{ .value = "Hex Linear", .size = 12, .tone = .muted } }, &.{}), linear_input }),
+        try b.node(0, .{ .direction = .row, .gap = 8, .align_items = .center }, .none, &.{ try b.node(0, .{ .width = 64 }, .{ .text = .{ .value = "Hex sRGB", .size = 12, .tone = .muted } }, &.{}), srgb_input }),
+    });
+    const picker = try b.node(0, .{ .direction = .row, .gap = 12 }, .none, &.{
+        wheel,
+        try bar(b, first_id + 1, editor, .saturation, "Saturation"),
+        try bar(b, first_id + 2, editor, .value, "Value"),
+    });
+    return b.node(0, .{ .gap = 12 }, .none, &.{
+        try b.node(0, .{ .direction = .row, .wrap = true, .gap = 16 }, .none, &.{ picker, values }),
+        try b.node(0, .{ .direction = .row, .wrap = true, .gap = 6 }, .none, chips),
+        try b.node(0, .{ .direction = .row, .gap = 8, .justify = .end }, .none, &.{
+            try b.buttonVariant(first_id + 12, "OK", .default),
+            try b.buttonVariant(first_id + 13, "Cancel", .outline),
+        }),
+    });
+}
+
+pub const TypesetOptions = struct {
+    /// `chat` tightens sizes and spacing for message bodies.
+    density: enum { docs, chat } = .docs,
+};
+
+/// Style rendered markdown in one container (shadcn/ui Typeset): `#`-`####` headings,
+/// paragraphs, `-`/`*`/`1.` lists, `>` quotes, fenced code, and `|` tables.
+// ponytail: block-level only; inline **bold**, _italic_ and links render as plain text (backticks are dropped).
+pub fn typeset(b: L.Builder, markdown: []const u8, options: TypesetOptions) !*L.Element {
+    const chat = options.density == .chat;
+    const body: f32 = if (chat) 15 else 16;
+    var blocks: std.ArrayList(*L.Element) = .empty;
+    defer blocks.deinit(b.allocator);
+    var paragraph_text: std.ArrayList(u8) = .empty;
+    var list_items: std.ArrayList([]const u8) = .empty;
+    var ordered = false;
+    var table_rows: std.ArrayList([]const []const u8) = .empty;
+    var code: ?std.ArrayList(u8) = null;
+    var lines = std.mem.splitScalar(u8, markdown, '\n');
+    while (true) {
+        const raw = lines.next();
+        const line = std.mem.trimEnd(u8, raw orelse "", " \r\t");
+        if (code) |*block| {
+            if (raw == null or std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```")) {
+                const text = try b.node(0, .{}, .{ .text = .{ .value = try block.toOwnedSlice(b.allocator), .size = body - 2, .wrap = true } }, &.{});
+                try blocks.append(b.allocator, try b.node(0, .{ .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 } }, .{ .surface = .track }, &.{text}));
+                code = null;
+                if (raw == null) break;
+                continue;
+            }
+            if (block.items.len > 0) try block.append(b.allocator, '\n');
+            try block.appendSlice(b.allocator, line);
+            continue;
+        }
+        const trimmed = std.mem.trimStart(u8, line, " ");
+        const bullet = std.mem.startsWith(u8, trimmed, "- ") or std.mem.startsWith(u8, trimmed, "* ");
+        const number = numberedItem(trimmed);
+        const table_line = std.mem.startsWith(u8, trimmed, "|");
+        // Close whatever block this line does not continue.
+        if (paragraph_text.items.len > 0 and (raw == null or trimmed.len == 0 or bullet or number != null or table_line or trimmed[0] == '#' or trimmed[0] == '>' or std.mem.startsWith(u8, trimmed, "```"))) {
+            try blocks.append(b.allocator, try b.node(0, .{}, .{ .text = .{ .value = try paragraph_text.toOwnedSlice(b.allocator), .size = body, .wrap = true } }, &.{}));
+        }
+        if (list_items.items.len > 0 and ((!bullet and number == null) or (number != null) != ordered)) {
+            try blocks.append(b.allocator, try markdownList(b, list_items.items, ordered, body));
+            list_items.clearRetainingCapacity();
+        }
+        if (table_rows.items.len > 0 and !table_line) {
+            try blocks.append(b.allocator, try table(b, table_rows.items[0], table_rows.items[1..]));
+            table_rows.clearRetainingCapacity();
+        }
+        if (raw == null) break;
+        if (trimmed.len == 0) continue;
+        if (std.mem.startsWith(u8, trimmed, "```")) {
+            code = .empty;
+        } else if (trimmed[0] == '#') {
+            const level = std.mem.indexOfNone(u8, trimmed, "#") orelse trimmed.len;
+            const title = std.mem.trimStart(u8, trimmed[level..], " ");
+            try blocks.append(b.allocator, try heading(b, @intCast(@min(4, level) + @as(usize, if (chat) 1 else 0)), try stripTicks(b, title)));
+        } else if (trimmed[0] == '>') {
+            try blocks.append(b.allocator, try blockquote(b, try stripTicks(b, std.mem.trimStart(u8, trimmed[1..], " "))));
+        } else if (bullet or number != null) {
+            ordered = number != null;
+            try list_items.append(b.allocator, try stripTicks(b, if (number) |rest| rest else trimmed[2..]));
+        } else if (table_line) {
+            var cells: std.ArrayList([]const u8) = .empty;
+            var parts = std.mem.splitScalar(u8, std.mem.trim(u8, trimmed, "|"), '|');
+            var divider = true;
+            while (parts.next()) |part| {
+                const cell = std.mem.trim(u8, part, " ");
+                if (std.mem.trim(u8, cell, "-: ").len != 0) divider = false;
+                try cells.append(b.allocator, try stripTicks(b, cell));
+            }
+            if (!divider) try table_rows.append(b.allocator, try cells.toOwnedSlice(b.allocator));
+        } else {
+            if (paragraph_text.items.len > 0) try paragraph_text.append(b.allocator, ' ');
+            try paragraph_text.appendSlice(b.allocator, try stripTicks(b, trimmed));
+        }
+    }
+    const result = try b.node(0, .{ .gap = if (chat) 10 else 16 }, .none, blocks.items);
+    result.accessibility = .{ .role = .group, .label = "Document" };
+    return result;
+}
+fn numberedItem(line: []const u8) ?[]const u8 {
+    const digits = std.mem.indexOfNone(u8, line, "0123456789") orelse return null;
+    if (digits == 0 or !std.mem.startsWith(u8, line[digits..], ". ")) return null;
+    return line[digits + 2 ..];
+}
+fn stripTicks(b: L.Builder, text: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, text, '`') == null) return text;
+    const out = try b.allocator.alloc(u8, text.len - std.mem.count(u8, text, "`"));
+    var n: usize = 0;
+    for (text) |byte| if (byte != '`') {
+        out[n] = byte;
+        n += 1;
+    };
+    return out;
+}
+fn markdownList(b: L.Builder, entries: []const []const u8, ordered: bool, size: f32) !*L.Element {
+    const rows = try b.allocator.alloc(*L.Element, entries.len);
+    defer b.allocator.free(rows);
+    for (entries, rows, 1..) |entry, *row, index| row.* = try b.node(0, .{ .direction = .row, .gap = 10, .padding = .{ .left = 8 } }, .none, &.{
+        try b.node(0, .{ .width = if (ordered) 20 else 8 }, .{ .text = .{ .value = if (ordered) try std.fmt.allocPrint(b.allocator, "{d}.", .{index}) else "\u{2022}", .size = size, .tone = .muted } }, &.{}),
+        try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = entry, .size = size, .wrap = true } }, &.{}),
+    });
+    return b.node(0, .{ .gap = 6 }, .none, rows);
+}
+
 /// Right-to-left (or left-to-right) region: rows mirror and start-aligned text moves right.
 pub fn textDirection(b: L.Builder, rtl: bool, children: []const *L.Element) !*L.Element {
     return b.node(0, .{ .gap = 12, .rtl = rtl }, .none, children);
@@ -929,10 +1114,11 @@ pub fn textDirection(b: L.Builder, rtl: bool, children: []const *L.Element) !*L.
 /// Typography: headings h1-h4 (h2 carries a rule underneath).
 pub fn heading(b: L.Builder, level: u3, text: []const u8) !*L.Element {
     const size: f32 = switch (level) {
-        1 => 36,
-        2 => 28,
-        3 => 22,
-        else => 18,
+        1 => 34,
+        2 => 26,
+        3 => 21,
+        4 => 18,
+        else => 16,
     };
     const result = try b.node(0, .{}, .{ .text = .{ .value = text, .size = size, .wrap = true } }, &.{});
     result.accessibility.role = .heading;
@@ -954,14 +1140,8 @@ pub fn blockquote(b: L.Builder, text: []const u8) !*L.Element {
         try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = text, .size = 16, .tone = .muted, .wrap = true } }, &.{}),
     });
 }
-pub fn list(b: L.Builder, entries: []const []const u8) !*L.Element {
-    const rows = try b.allocator.alloc(*L.Element, entries.len);
-    defer b.allocator.free(rows);
-    for (entries, rows) |entry, *row| row.* = try b.node(0, .{ .direction = .row, .gap = 10, .padding = .{ .left = 8 } }, .none, &.{
-        try b.node(0, .{ .width = 6 }, .{ .text = .{ .value = "\u{2022}", .size = 16 } }, &.{}),
-        try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = entry, .size = 16, .wrap = true } }, &.{}),
-    });
-    return b.node(0, .{ .gap = 6 }, .none, rows);
+pub fn list(b: L.Builder, entries: []const []const u8, ordered: bool) !*L.Element {
+    return markdownList(b, entries, ordered, 16);
 }
 pub fn inlineCode(b: L.Builder, text: []const u8) !*L.Element {
     return b.node(0, .{ .direction = .row }, .none, &.{try b.node(0, .{ .padding = .{ .left = 6, .right = 6, .top = 2, .bottom = 2 } }, .{ .surface = .track }, &.{try b.node(0, .{}, .{ .text = .{ .value = text, .size = 14 } }, &.{})})});
@@ -1156,4 +1336,37 @@ test "menubar opens one menu with shortcuts, checks and an open submenu beside i
     try std.testing.expect(root.find(2).?.bounds.x > trigger.bounds.x);
     try std.testing.expectEqual(@FieldType(primitives.MenuItem, "indicator").checked, root.find(12).?.paint_kind.menu_item.indicator);
     try std.testing.expect(new_tab.actionable() and root.find(12).?.actionable());
+}
+
+test "typeset turns markdown blocks into headings, lists, quotes, code and tables" {
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = L.Builder{ .allocator = arena.allocator() };
+    const doc = try typeset(b,
+        \\# Title
+        \\First line
+        \\joins the paragraph with `code`.
+        \\
+        \\- one
+        \\- two
+        \\1. first
+        \\> quoted
+        \\```
+        \\zig build
+        \\```
+        \\| Name | Status |
+        \\| --- | --- |
+        \\| Eggy | Ready |
+    , .{});
+    doc.layout(.{ .x = 0, .y = 0, .w = 400, .h = 800 }, &font);
+    try std.testing.expectEqual(@as(usize, 7), doc.children.len);
+    try std.testing.expectEqualStrings("Title", doc.children[0].paint_kind.text.value);
+    try std.testing.expectEqualStrings("First line joins the paragraph with code.", doc.children[1].paint_kind.text.value);
+    try std.testing.expectEqual(@as(usize, 2), doc.children[2].children.len); // bullets
+    try std.testing.expectEqualStrings("1.", doc.children[3].children[0].children[0].paint_kind.text.value);
+    try std.testing.expectEqualStrings("zig build", doc.children[5].children[0].paint_kind.text.value);
+    try std.testing.expectEqual(L.Accessibility.Role.table, doc.children[6].accessibility.role.?);
+    try std.testing.expectEqual(@as(usize, 2), doc.children[6].children.len); // header + one row, divider dropped
 }
