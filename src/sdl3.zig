@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const sdl3 = @import("sdl3");
 const ui = @import("weeoui");
 const Vec2 = ui.Vec2;
+const log = std.log.scoped(.window);
 
 pub const RunOptions = struct {
     title: [:0]const u8 = "weeoui",
@@ -79,7 +80,10 @@ pub fn buttonLayout(gpa: std.mem.Allocator, io: std.Io) ui.titlebar.Layout {
     if (std.process.run(gpa, io, .{ .argv = &.{ "gsettings", "get", "org.gnome.desktop.wm.preferences", "button-layout" }, .stdout_limit = .limited(1024) })) |result| {
         defer gpa.free(result.stdout);
         defer gpa.free(result.stderr);
-        if (result.term == .exited and result.term.exited == 0 and std.mem.indexOfScalar(u8, result.stdout, ':') != null) return ui.titlebar.Layout.parse(result.stdout, .gnome);
+        if (result.term == .exited and result.term.exited == 0 and std.mem.indexOfScalar(u8, result.stdout, ':') != null) {
+            log.info("title bar buttons from GNOME: {s}", .{std.mem.trim(u8, result.stdout, " \r\n'")});
+            return ui.titlebar.Layout.parse(result.stdout, .gnome);
+        }
     } else |_| {}
     const home = std.mem.span(std.c.getenv("HOME") orelse return fallback);
     for ([_][]const u8{ "/.config/gtk-4.0/settings.ini", "/.config/gtk-3.0/settings.ini" }) |suffix| {
@@ -90,9 +94,13 @@ pub fn buttonLayout(gpa: std.mem.Allocator, io: std.Io) ui.titlebar.Layout {
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |line| {
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-            if (std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), "gtk-decoration-layout")) return ui.titlebar.Layout.parse(line[eq + 1 ..], .gnome);
+            if (std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), "gtk-decoration-layout")) {
+                log.info("title bar buttons from {s}: {s}", .{ path, std.mem.trim(u8, line[eq + 1 ..], " \t\r") });
+                return ui.titlebar.Layout.parse(line[eq + 1 ..], .gnome);
+            }
         }
     }
+    log.info("title bar buttons: platform default", .{});
     return fallback;
 }
 
@@ -111,6 +119,7 @@ pub const Frame = struct {
 pub fn useCustomFrame(window: sdl3.video.Window, frame: *Frame) !void {
     try window.setBordered(false);
     try window.setHitTest(Frame, frameHitTest, frame);
+    log.debug("window {d} uses a drawn title bar", .{window.getId() catch 0});
 }
 
 fn frameHitTest(window: sdl3.video.Window, area: sdl3.rect.IPoint, frame: ?*Frame) sdl3.video.HitTestResult {
@@ -142,6 +151,7 @@ fn frameHitTest(window: sdl3.video.Window, area: sdl3.rect.IPoint, frame: ?*Fram
 /// Carry out a title bar button: minimize, or toggle maximize. Returns true for close, which
 /// the app handles (quit, or dock a panel back).
 pub fn windowAction(window: sdl3.video.Window, pressed: ui.titlebar.Button) bool {
+    log.info("window {d}: {s}", .{ window.getId() catch 0, if (pressed == .maximize and window.getFlags().maximized) "restore" else @tagName(pressed) });
     switch (pressed) {
         .close => return true,
         .minimize => window.minimize() catch {},

@@ -2,6 +2,7 @@
 const std = @import("std");
 const c = @import("freetype").c;
 const Rect = @import("types.zig").Rect;
+const log = std.log.scoped(.font);
 
 pub const atlas_width = 2048;
 pub const atlas_height = 2048;
@@ -92,6 +93,8 @@ const Dynamic = struct {
     color_shelf: Shelf = .{ .width = color_atlas_size, .height = color_atlas_size },
     /// Bumped whenever either atlas gains pixels; renderers re-upload when it changes.
     version: u32 = 0,
+    /// Warn about a full atlas once, not for every glyph that no longer fits.
+    full_reported: bool = false,
 };
 
 fn copyGray(pixels: []u8, stride: usize, at: [2]usize, bitmap: c.FT_Bitmap) void {
@@ -176,6 +179,7 @@ pub const Font = struct {
             pixels[(at[1] + row) * atlas_width + at[0] + column] = @intFromFloat(@round(std.math.clamp(0.5 + (1 - d) * 0.5, 0, 1) * 255));
         };
         font.corner = .{ .x = @intCast(at[0] + 1), .y = @intCast(at[1] + 1), .w = corner_size, .h = corner_size };
+        log.debug("rasterized {d} strikes ({d}-{d}px); atlas {d}% full", .{ strike_sizes.len, strike_sizes[0], strike_sizes[strike_sizes.len - 1], (shelf.y + shelf.row_h) * 100 / atlas_height });
         return font;
     }
 
@@ -205,12 +209,15 @@ pub const Font = struct {
     pub fn loadSystemEmoji(self: *Font, io: std.Io) bool {
         for (system_emoji_paths) |path| {
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(64 << 20)) catch continue;
-            self.setEmojiFont(bytes) catch {
+            self.setEmojiFont(bytes) catch |err| {
+                log.warn("skipping emoji font {s}: {s}", .{ path, @errorName(err) });
                 self.allocator.free(bytes);
                 continue;
             };
+            log.info("color emoji from {s}", .{path});
             return true;
         }
+        log.info("no color emoji font found; emoji draw as '?'", .{});
         return false;
     }
 
@@ -326,7 +333,13 @@ pub const Font = struct {
         const d = self.dynamic;
         if (d.glyphs.get(key)) |g| return g;
         // A failed lookup is cached as '?' so a missing character costs one FreeType call.
-        const g = self.rasterize(selected, cp) catch selected.glyph('?');
+        const g = self.rasterize(selected, cp) catch |err| blk: {
+            if (err == error.AtlasFull and !d.full_reported) {
+                d.full_reported = true;
+                log.warn("glyph atlas is full; new characters draw as '?'", .{});
+            }
+            break :blk selected.glyph('?');
+        };
         d.glyphs.put(self.allocator, key, g) catch return g;
         if (g.w > 0 and !std.meta.eql(g, selected.glyph('?'))) d.version +%= 1;
         return g;

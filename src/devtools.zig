@@ -10,6 +10,7 @@ const types = @import("types.zig");
 const Canvas = @import("canvas.zig").Canvas;
 const Font = @import("font.zig").Font;
 const Rect = types.Rect;
+const devlog = std.log.scoped(.devtools);
 
 /// Every panel control uses an id from `first_id` upwards; keep app ids below it.
 pub const first_id: u32 = 0xDE70_0000;
@@ -348,14 +349,22 @@ pub const Devtools = struct {
         const slot = &entry.value_ptr.values[@intFromEnum(prop)];
         if (slot.*) |old| if (old == .text) gpa.free(old.text);
         slot.* = value;
+        switch (value) {
+            .number => |n| devlog.info("{s} = {d}", .{ prop.name(), n }),
+            .auto => devlog.info("{s} = auto", .{prop.name()}),
+            .choice => |c| devlog.info("{s} = {s}", .{ prop.name(), prop.choices()[c] }),
+            .text => |t| devlog.info("{s} = \"{s}\"", .{ prop.name(), t }),
+        }
     }
     fn resetSelected(self: *Devtools, gpa: std.mem.Allocator) void {
         const removed = self.overrides.fetchRemove(self.selected) orelse return;
+        devlog.info("reset the selected element's edits", .{});
         for (removed.value.values) |value| if (value) |v| if (v == .text) gpa.free(v.text);
     }
     fn clearEdits(self: *Devtools, gpa: std.mem.Allocator) void {
         var it = self.overrides.valueIterator();
         while (it.next()) |edits| for (edits.values) |value| if (value) |v| if (v == .text) gpa.free(v.text);
+        if (self.overrides.count() > 0) devlog.info("cleared edits on {d} element(s)", .{self.overrides.count()});
         self.overrides.clearRetainingCapacity();
     }
 
@@ -546,7 +555,10 @@ pub const Devtools = struct {
         self.editing = null;
         var trail: std.ArrayList(u64) = .empty;
         defer trail.deinit(gpa);
-        _ = try find(page, root_path, path, &trail, gpa);
+        if (try find(page, root_path, path, &trail, gpa)) |element| {
+            var tag_buffer: [48]u8 = undefined;
+            devlog.info("inspecting <{s}> #{d} at {d:.0},{d:.0} ({d:.0}x{d:.0})", .{ tagName(&tag_buffer, element), element.id, element.bounds.x, element.bounds.y, element.bounds.w, element.bounds.h });
+        }
         for (trail.items) |ancestor| if (!self.isOpen(ancestor)) {
             if (self.collapsed.contains(ancestor)) _ = self.collapsed.remove(ancestor) else try self.collapsed.put(gpa, ancestor, {});
         };

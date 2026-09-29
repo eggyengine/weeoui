@@ -4,6 +4,7 @@
 const std = @import("std");
 const vit = @import("vitellus");
 const ui = @import("weeoui");
+const log = std.log.scoped(.renderer);
 
 pub const Renderer = struct {
     device: vit.Device,
@@ -193,6 +194,7 @@ pub const Painter = struct {
         errdefer swapchain.deinit();
         const format = colorFormat(caps.formats[0]);
         const renderer = try Renderer.init(device, format, font);
+        log.info("painting {d}x{d} as {s}", .{ extent.width, extent.height, @tagName(format) });
         return .{ .instance = instance, .adapter = adapter, .device = device, .queue = queue, .commands = commands, .swapchain = swapchain, .format = format, .extent = extent, .renderer = renderer };
     }
 

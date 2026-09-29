@@ -13,6 +13,7 @@ const titlebar = @import("titlebar.zig");
 const types = @import("types.zig");
 const Canvas = @import("canvas.zig").Canvas;
 const Rect = types.Rect;
+const log = std.log.scoped(.dock);
 
 /// Dock controls use ids from `first_id`; keep app ids below it.
 pub const first_id: u32 = 0xD0C0_0000;
@@ -38,7 +39,7 @@ const max_nodes = 64;
 const max_tabs = 16;
 pub const max_floating = 8;
 pub const max_windows = 8;
-const splitter: f32 = 4;
+const splitter: f32 = 6;
 const min_side: f32 = 60;
 const grip: f32 = 14;
 
@@ -271,6 +272,7 @@ pub const DockSpace = struct {
         self.remove(panel);
         self.z_counter += 1;
         self.floating[slot] = .{ .root = try self.newRoot(panel), .rect = rect, .z = self.z_counter };
+        log.info("panel {d} floated at {d:.0},{d:.0} ({d:.0}x{d:.0})", .{ panel, rect.x, rect.y, rect.w, rect.h });
     }
 
     /// Move `panel` into a new OS window; the app opens it on the next frame. Without OS window
@@ -285,6 +287,7 @@ pub const DockSpace = struct {
         } else return error.TooManyWindows;
         self.remove(panel);
         self.windows[slot] = .{ .root = try self.newRoot(panel), .size = size };
+        log.info("panel {d} popped out into window {d} ({d:.0}x{d:.0})", .{ panel, slot, size[0], size[1] });
     }
 
     /// Return every panel of a floating or OS window to the main window and close it.
@@ -297,6 +300,7 @@ pub const DockSpace = struct {
         };
         var panels: [max_nodes * max_tabs]u32 = undefined;
         const n = self.collect(root, &panels, 0);
+        log.info("docking {d} panel(s) back from {s}", .{ n, @tagName(host) });
         for (panels[0..n]) |panel| {
             self.remove(panel);
             self.add(panel, null, .center) catch {};
@@ -503,7 +507,9 @@ pub const DockSpace = struct {
                 if (!t.started) return;
                 const target = self.targetAt(t.panel, x, y);
                 switch (target) {
-                    .node => |n| self.move(t.panel, n.index, n.side) catch {},
+                    .node => |n| {
+                        if (self.move(t.panel, n.index, n.side)) log.info("panel {d} docked {s}", .{ t.panel, @tagName(n.side) }) else |err| log.warn("cannot dock panel {d}: {s}", .{ t.panel, @errorName(err) });
+                    },
                     .float => |r| self.float(t.panel, r) catch {},
                     .window => self.detach(t.panel) catch {},
                 }
@@ -625,7 +631,9 @@ pub const DockSpace = struct {
         const node = self.nodes[index];
         const r = node.rect;
         if (node.kind == .split) {
-            const handle = try b.node(split_first + index, if (node.vertical) .{ .height = splitter } else .{ .width = splitter }, .hover, &.{});
+            // Full length both ways: rows don't stretch children, so a side-by-side splitter
+            // without a height would be 0px tall and impossible to grab.
+            const handle = try b.node(split_first + index, if (node.vertical) .{ .width = r.w, .height = splitter } else .{ .width = splitter, .height = r.h }, .hover, &.{});
             handle.cursor = if (node.vertical) .ns_resize else .ew_resize;
             handle.accessibility = .{ .role = .slider, .label = "Resize panels", .numeric_value = node.ratio };
             return b.node(0, .{ .width = r.w, .height = r.h, .direction = if (node.vertical) .column else .row }, .none, &.{
@@ -798,7 +806,7 @@ test "panels split, tab, collapse and keep their sizes" {
     const scene = dock.nodes[dock.nodeOf(1).?].rect;
     const inspector = dock.nodes[dock.nodeOf(3).?].rect;
     try std.testing.expectEqual(@as(f32, 0), scene.x);
-    try std.testing.expectApproxEqAbs(@as(f32, 498), scene.w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 497), scene.w, 0.01);
     try std.testing.expect(inspector.x > 500 and inspector.y > 290);
     // Tabbing Console into Scene's stack collapses the right column's upper half.
     try dock.move(2, dock.nodeOf(1).?, .center);
@@ -880,7 +888,7 @@ test "splitters resize within limits and pop-out floats without OS windows" {
     dock.dragTo(250, 300);
     dock.release(250, 300);
     dock.layout(viewport);
-    try std.testing.expectApproxEqAbs(@as(f32, 248), dock.nodes[dock.nodeOf(2).?].rect.w, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 247), dock.nodes[dock.nodeOf(2).?].rect.w, 1);
     try std.testing.expect(dock.press(split_first + dock.root, 250, 300));
     dock.dragTo(-500, 300);
     dock.release(-500, 300);
@@ -927,4 +935,36 @@ test "floating windows minimize to their tab bar, maximize over the main window,
     try std.testing.expectEqual(@as(f32, 300), dock.floating[0].?.rect.w);
     try std.testing.expect(dock.activate(close));
     try std.testing.expect(dock.floating[0] == null and dock.hostOf(dock.nodeOf(2).?) == .main);
+}
+
+test "splitters span their whole edge in both directions, so both can be grabbed" {
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = L.Builder{ .allocator = arena.allocator() };
+    var dock = DockSpace.init();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 1000, .h = 600 };
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .right); // side by side: the root splits horizontally
+    try dock.add(3, 2, .bottom); // stacked: the right half splits vertically
+    const root = try dock.build(b, .main, viewport, TestProvider{});
+    root.layout(viewport, &font);
+    const beside = root.find(split_first + dock.root).?;
+    try std.testing.expectEqual(splitter, beside.bounds.w);
+    try std.testing.expectEqual(viewport.h, beside.bounds.h);
+    try std.testing.expect(beside.actionable());
+    const stacked = root.find(split_first + dock.nodes[dock.root].second).?;
+    try std.testing.expectEqual(splitter, stacked.bounds.h);
+    try std.testing.expect(stacked.bounds.w > 400);
+    // Dragging each one moves its divider.
+    try std.testing.expect(dock.press(split_first + dock.root, beside.bounds.center().x, 300));
+    dock.dragTo(300, 300);
+    dock.release(300, 300);
+    try std.testing.expect(dock.nodes[dock.root].ratio < 0.35);
+    const right = dock.nodes[dock.root].second;
+    try std.testing.expect(dock.press(split_first + right, stacked.bounds.center().x, stacked.bounds.center().y));
+    dock.dragTo(700, 100);
+    dock.release(700, 100);
+    try std.testing.expect(dock.nodes[right].ratio < 0.25);
 }
