@@ -310,9 +310,9 @@ pub fn resizable(b: L.Builder, viewport: Rect, fraction: f32, handle_id: u32, fi
     first.style.height = viewport.h;
     second.style.width = @max(0, viewport.w - 6 - first_width);
     second.style.height = viewport.h;
-    return b.node(0, .{ .width = viewport.w, .height = viewport.h, .direction = .row }, .none, &.{
-        first, try b.node(handle_id, .{ .width = 6, .height = viewport.h }, .skeleton, &.{}), second,
-    });
+    const handle = try b.node(handle_id, .{ .width = 6, .height = viewport.h }, .skeleton, &.{});
+    handle.cursor = .ew_resize;
+    return b.node(0, .{ .width = viewport.w, .height = viewport.h, .direction = .row }, .none, &.{ first, handle, second });
 }
 
 pub fn modal(b: L.Builder, viewport: Rect, kind: Modal, children: []const *L.Element) !*L.Element {

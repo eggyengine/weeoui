@@ -1,6 +1,13 @@
 # weeoui
 
-weeoui is a UI library used in the eggy engine project. 
+_weeoui_ (meaning yes yes, little yes, or ykw depending on your mindset) is a UI library written in Zig and used in the [eggy](https://github.com/eggyengine/eggy) engine project.
+
+what you get:
+
+- **a fucktonne of components**: buttons, inputs, selects, menus and menubars, dialogs, sheets, calendars, tables, toasts, the lot, in a warm light/dark "yolk" theme that can follow the system
+- **proper layouts**: flex rows and columns with justify, wrap and grow, grids, right-to-left, and scroll areas
+- **editor tooling**: dockable panels you can split, tab, float, or pop out into their own OS windows, custom title bars whose buttons follow your desktop's layout, an Unreal-style colour picker, and Chrome-style DevTools that can inspect and edit the UI live
+- **accessibility first**: every control reaches screen readers through AccessKit, with keyboard focus, visible focus rings, and cursors that match what's under the pointer
 
 ## add to project
 requires zig `0.16.0`
@@ -39,16 +46,16 @@ exe.root_module.addImport("weeoui_vitellus", b.createModule(.{
 
 ## quick start
 
-weeoui is immediate mode: each frame you call widgets from your own state, and they return what the user did. with both backends enabled (`.sdl3 = true, .vitellus = true`), `weeoui_sdl3.run` opens the window and handles the GPU, input, HiDPI, system light/dark theme and emoji for you:
+weeoui is immediate mode: each frame you call widgets from your own state, and they return what the user did. with both backends enabled (`.sdl3 = true, .vitellus = true`), `weeoui_sdl3.run` opens the window and handles the GPU, input, displays and more for you. 
 
 ```zig
 const std = @import("std");
 const ui = @import("weeoui");
 const weeoui_sdl3 = @import("weeoui_sdl3");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var count: u32 = 0;
-    try weeoui_sdl3.run(std.heap.smp_allocator, .{ .title = "Counter" }, &count, frame);
+    try weeoui_sdl3.run(init.gpa, .{ .title = "Counter" }, &count, frame);
 }
 
 fn frame(count: *u32, ctx: *ui.Context) !void {
@@ -58,10 +65,6 @@ fn frame(count: *u32, ctx: *ui.Context) !void {
     ctx.end();
 }
 ```
-
-already own a window or device? `weeoui_vitellus.Painter` takes any `vitellus.Window` and draws a frame with `painter.paint(extent, &ctx.font, try ctx.render(), viewport, ctx.theme.background)`; `weeoui_vitellus.Renderer` is the lower-level piece that records into your own render pass (`upload` before it, `draw` inside it).
-
-screen readers work out of the box: `ctx` publishes its widget tree through [AccessKit](https://accesskit.dev) every frame, `weeoui_sdl3.handleEvent` attaches it to your window on the first event, and a screen reader "click" makes `ctx.button` return true like a mouse click. set `ctx.name` to change the window name announced. other windowing backends call `ctx.attachAccessibility(...)` once. on windows, install `ui.namedLazyPath("accesskit_dll")` next to your executable.
 
 the runnable version is [`examples/counter.zig`](examples/counter.zig):
 ```bash

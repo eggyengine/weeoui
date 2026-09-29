@@ -3,6 +3,8 @@ const std = @import("std");
 const Vec2 = @import("types.zig").Vec2;
 
 pub const Button = enum { left, middle, right };
+/// Pointer shapes a widget can ask for; backends map them to system cursors.
+pub const Cursor = enum { default, pointer, text, crosshair, move, not_allowed, ew_resize, ns_resize, nwse_resize, nesw_resize, progress, wait };
 /// Keys Weeoui widgets react to; everything else is delivered as text.
 pub const Key = enum {
     tab,

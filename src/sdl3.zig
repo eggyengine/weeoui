@@ -61,12 +61,118 @@ pub fn run(gpa: std.mem.Allocator, options: RunOptions, state: anytype, comptime
         ctx.newFrame(viewport);
         try frame(state, &ctx);
         try painter.paint(pixels, &ctx.font, try ctx.render(), viewport, ctx.theme.background);
+        setCursor(ctx.cursor);
     }
 }
 
 fn pixelSize(window: sdl3.video.Window) !@import("vitellus").Extent2D {
     const size = try window.getSizeInPixels();
     return .{ .width = @intCast(size.@"0"), .height = @intCast(size.@"1") };
+}
+
+/// The close/minimize/maximize layout the desktop uses. On Linux this reads GNOME's
+/// `button-layout` (what gnome-tweaks edits), then GTK's `gtk-decoration-layout`; macOS and
+/// Windows use their fixed conventions.
+pub fn buttonLayout(gpa: std.mem.Allocator, io: std.Io) ui.titlebar.Layout {
+    const fallback = ui.titlebar.Layout.default(builtin.os.tag);
+    if (builtin.os.tag == .macos or builtin.os.tag == .windows) return fallback;
+    if (std.process.run(gpa, io, .{ .argv = &.{ "gsettings", "get", "org.gnome.desktop.wm.preferences", "button-layout" }, .stdout_limit = .limited(1024) })) |result| {
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        if (result.term == .exited and result.term.exited == 0 and std.mem.indexOfScalar(u8, result.stdout, ':') != null) return ui.titlebar.Layout.parse(result.stdout, .gnome);
+    } else |_| {}
+    const home = std.mem.span(std.c.getenv("HOME") orelse return fallback);
+    for ([_][]const u8{ "/.config/gtk-4.0/settings.ini", "/.config/gtk-3.0/settings.ini" }) |suffix| {
+        const path = std.fmt.allocPrint(gpa, "{s}{s}", .{ home, suffix }) catch continue;
+        defer gpa.free(path);
+        const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 10)) catch continue;
+        defer gpa.free(text);
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            if (std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), "gtk-decoration-layout")) return ui.titlebar.Layout.parse(line[eq + 1 ..], .gnome);
+        }
+    }
+    return fallback;
+}
+
+/// Where a borderless window's title bar and buttons are, for the OS hit test. Keep it at a
+/// stable address and refresh it after each layout.
+pub const Frame = struct {
+    bar: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    buttons: [3]ui.Rect = @splat(.{ .x = 0, .y = 0, .w = 0, .h = 0 }),
+    button_count: u8 = 0,
+    /// UI units per window point (e.g. 1 / ui scale).
+    scale: f32 = 1,
+};
+
+/// Replace `window`'s OS decorations with a drawn title bar: presses on `frame.bar` move the
+/// window (with the desktop's snapping) and its edges resize it.
+pub fn useCustomFrame(window: sdl3.video.Window, frame: *Frame) !void {
+    try window.setBordered(false);
+    try window.setHitTest(Frame, frameHitTest, frame);
+}
+
+fn frameHitTest(window: sdl3.video.Window, area: sdl3.rect.IPoint, frame: ?*Frame) sdl3.video.HitTestResult {
+    const f = frame orelse return .normal;
+    const size = window.getSize() catch return .normal;
+    const s = f.scale;
+    const hit = ui.titlebar.hitTest(
+        .{ @as(f32, @floatFromInt(size.@"0")) * s, @as(f32, @floatFromInt(size.@"1")) * s },
+        f.bar,
+        f.buttons[0..f.button_count],
+        window.getFlags().maximized,
+        @as(f32, @floatFromInt(area.x)) * s,
+        @as(f32, @floatFromInt(area.y)) * s,
+    );
+    return switch (hit) {
+        .normal => .normal,
+        .drag => .draggable,
+        .resize_top_left => .resize_top_left,
+        .resize_top => .resize_top,
+        .resize_top_right => .resize_top_right,
+        .resize_right => .resize_right,
+        .resize_bottom_right => .resize_bottom_right,
+        .resize_bottom => .resize_bottom,
+        .resize_bottom_left => .resize_bottom_left,
+        .resize_left => .resize_left,
+    };
+}
+
+/// Carry out a title bar button: minimize, or toggle maximize. Returns true for close, which
+/// the app handles (quit, or dock a panel back).
+pub fn windowAction(window: sdl3.video.Window, pressed: ui.titlebar.Button) bool {
+    switch (pressed) {
+        .close => return true,
+        .minimize => window.minimize() catch {},
+        .maximize => (if (window.getFlags().maximized) window.restore() else window.maximize()) catch {},
+    }
+    return false;
+}
+
+var cursors: [@typeInfo(ui.Cursor).@"enum".fields.len]?sdl3.mouse.Cursor = @splat(null);
+var current_cursor: ?ui.Cursor = null;
+
+/// Show `cursor`, creating each system cursor once. Cheap to call every frame.
+pub fn setCursor(cursor: ui.Cursor) void {
+    if (current_cursor == cursor) return;
+    const i = @intFromEnum(cursor);
+    if (cursors[i] == null) cursors[i] = sdl3.mouse.Cursor.initSystem(switch (cursor) {
+        .default => .default,
+        .pointer => .pointer,
+        .text => .text,
+        .crosshair => .crosshair,
+        .move => .move,
+        .not_allowed => .not_allowed,
+        .ew_resize => .east_west_resize,
+        .ns_resize => .north_south_resize,
+        .nwse_resize => .northwest_southeast_resize,
+        .nesw_resize => .northeast_southwest_resize,
+        .progress => .progress,
+        .wait => .wait,
+    }) catch return;
+    sdl3.mouse.set(cursors[i]) catch return;
+    current_cursor = cursor;
 }
 
 /// The theme matching the OS light/dark setting. Re-read it on `.system_theme_changed`.

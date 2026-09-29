@@ -52,6 +52,8 @@ pub const Context = struct {
     debug_hitboxes: bool = false,
     /// Draw the focus ring: on after keyboard navigation, off after a click (like :focus-visible).
     focus_visible: bool = false,
+    /// Pointer shape for the element under the pointer, after `render`; backends apply it.
+    cursor: input.Cursor = .default,
 
     const Open = struct { kind: Container, id: u32, children: std.ArrayList(*L.Element) = .empty };
 
@@ -183,6 +185,7 @@ pub const Context = struct {
             canvas.srgb_target = self.srgb_target;
             canvas.focus_id = if (self.focus_visible) self.focus else 0;
             canvas.hot_id = self.hoveredWidget();
+            self.cursor = if (root.find(canvas.hot_id)) |hot| hot.cursorFor() else .default;
             if (root.draw(&canvas)) {
                 if (self.debug_hitboxes) root.drawHitboxes(&canvas) catch |e| switch (e) {
                     error.OutOfVertices => {

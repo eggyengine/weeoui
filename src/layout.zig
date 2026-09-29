@@ -110,6 +110,8 @@ pub const Element = struct {
     clip: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// Resolved from `style.rtl` and the parent during layout.
     rtl: bool = false,
+    /// Pointer shape over this element; null picks one from what it is (see `cursorFor`).
+    cursor: ?@import("input.zig").Cursor = null,
     natural_width: ?f32 = null,
     measured_height_width: ?f32 = null,
     measured_height: f32 = 0,
@@ -139,6 +141,20 @@ pub const Element = struct {
         return switch (role) {
             .button, .checkbox, .switch_control, .slider, .input, .radio, .tab, .menu_item, .column_header => true,
             else => false,
+        };
+    }
+    /// The pointer shape to show over this element: its own `cursor`, else a hand for
+    /// clickable things, an I-beam for text fields, a crosshair for the color wheel, and
+    /// "not allowed" for disabled controls.
+    pub fn cursorFor(self: *const Element) @import("input.zig").Cursor {
+        if (self.cursor) |c| return c;
+        if (self.accessibility.disabled) return .not_allowed;
+        return switch (self.paint_kind) {
+            .input => |i| if (i.disabled) .not_allowed else .text,
+            .color_wheel => .crosshair,
+            .menu_item => |m| if (m.disabled) .not_allowed else if (m.heading) .default else .pointer,
+            .text => |t| if (t.link and self.id != 0) .pointer else .default,
+            else => if (self.actionable()) .pointer else .default,
         };
     }
     pub fn scrollAt(self: *const Element, x: f32, y: f32) ?*ScrollState {
@@ -981,4 +997,20 @@ test "anchored popups disappear when their trigger scrolls fully out of view" {
     scroll.offset.y = 140;
     container.layout(.{ .x = 0, .y = 0, .w = 200, .h = 100 }, &font);
     try std.testing.expect(panel.clip.h > 0);
+}
+
+test "cursors follow what is under the pointer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    try std.testing.expectEqual(@import("input.zig").Cursor.pointer, (try b.button(1, "Go")).cursorFor());
+    try std.testing.expectEqual(@import("input.zig").Cursor.text, (try b.input(2, .{})).cursorFor());
+    try std.testing.expectEqual(@import("input.zig").Cursor.not_allowed, (try b.input(3, .{ .disabled = true })).cursorFor());
+    try std.testing.expectEqual(@import("input.zig").Cursor.default, (try b.text("Plain")).cursorFor());
+    const disabled = try b.button(4, "No");
+    disabled.accessibility.disabled = true;
+    try std.testing.expectEqual(@import("input.zig").Cursor.not_allowed, disabled.cursorFor());
+    const handle = try b.node(5, .{}, .skeleton, &.{});
+    handle.cursor = .ew_resize;
+    try std.testing.expectEqual(@import("input.zig").Cursor.ew_resize, handle.cursorFor());
 }

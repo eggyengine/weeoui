@@ -1,8 +1,9 @@
-//! Chrome-style DevTools for any Weeoui layout tree: Elements (the whole tree, box model, and
-//! editable styles), Performance, and Console. The app owns one `Devtools`, splits its viewport
-//! with `split`, calls `apply` on each freshly built page (edits live as overrides, because the
-//! page is rebuilt every frame), builds `panel` beside it, routes the panel's ids to `activate`
-//! and text keys to `insertText`/`editKey`/`commit`, and draws `highlight` over the page last.
+//! Chrome-style DevTools for any Weeoui layout tree, as three tools the app shows in panels
+//! (dock panels, say): Elements (the whole tree, box model, editable styles), Performance, and
+//! Console. Each frame the app calls `apply` on its freshly built page (edits live as overrides,
+//! because the page is rebuilt every frame), lays it out, calls `prepare` with it, and builds
+//! `view` for each tool it shows. Route the tools' ids to `activate`, text keys to
+//! `insertText`/`editKey`/`commit`, and draw `highlight` over the page last.
 const std = @import("std");
 const L = @import("layout.zig");
 const types = @import("types.zig");
@@ -12,13 +13,10 @@ const Rect = types.Rect;
 
 /// Every panel control uses an id from `first_id` upwards; keep app ids below it.
 pub const first_id: u32 = 0xDE70_0000;
-const tab_id = first_id; // + @intFromEnum(Tab)
 const inspect_id = first_id + 8;
-const close_id = first_id + 9;
 const clear_id = first_id + 10;
-const dock_id = first_id + 11;
-/// Id on the panel's root element (not interactive), to find its bounds.
-pub const panel_id = first_id + 12;
+/// Id on each tool view's root element (not interactive): + @intFromEnum(Tool).
+pub const view_id = first_id + 20;
 const reset_id = first_id + 13;
 const clear_edits_id = first_id + 14;
 const expand_all_id = first_id + 15;
@@ -32,7 +30,7 @@ const chevron_first = row_first + max_rows;
 const console_lines = 200;
 const line_bytes = 200;
 
-pub const Tab = enum(u8) { elements, performance, console };
+pub const Tool = enum(u8) { elements, performance, console };
 pub const Level = enum { info, warn, err };
 /// Keys a property field understands while it is being edited.
 pub const EditKey = enum { left, right, home, end, backspace, delete, select_all, up, down };
@@ -268,11 +266,8 @@ fn applyValue(element: *L.Element, prop: Prop, value: Value) void {
 }
 
 pub const Devtools = struct {
-    open: bool = false,
-    tab: Tab = .elements,
     /// Pick mode: hovering the page highlights, clicking selects.
     inspecting: bool = false,
-    dock: enum { auto, right, bottom } = .auto,
     selected: u64 = 0,
     /// Page element under the pointer while inspecting.
     hovered: u64 = 0,
@@ -315,14 +310,6 @@ pub const Devtools = struct {
         self.collapsed.deinit(gpa);
     }
 
-    pub fn toggle(self: *Devtools) void {
-        self.open = !self.open;
-        if (!self.open) {
-            self.inspecting = false;
-            self.editing = null;
-        }
-    }
-
     pub fn recordFrame(self: *Devtools, milliseconds: f32) void {
         self.frames[self.frame_head] = milliseconds;
         self.frame_head = (self.frame_head + 1) % self.frames.len;
@@ -335,22 +322,6 @@ pub const Devtools = struct {
         self.line_lens[slot] = @intCast(@min(text.len, 255));
         self.line_levels[slot] = level;
         if (self.line_count == console_lines) self.line_head = (self.line_head + 1) % console_lines else self.line_count += 1;
-    }
-
-    /// Where the page and the docked panel go inside `viewport`.
-    pub fn split(self: *const Devtools, viewport: Rect) struct { page: Rect, panel: Rect, right: bool } {
-        if (!self.open) return .{ .page = viewport, .panel = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .right = true };
-        const right = switch (self.dock) {
-            .right => true,
-            .bottom => false,
-            .auto => viewport.w >= 900,
-        };
-        if (right) {
-            const w = @min(460, viewport.w * 0.45);
-            return .{ .page = .{ .x = viewport.x, .y = viewport.y, .w = viewport.w - w, .h = viewport.h }, .panel = .{ .x = viewport.x + viewport.w - w, .y = viewport.y, .w = w, .h = viewport.h }, .right = true };
-        }
-        const h = @min(360, viewport.h * 0.5);
-        return .{ .page = .{ .x = viewport.x, .y = viewport.y, .w = viewport.w, .h = viewport.h - h }, .panel = .{ .x = viewport.x, .y = viewport.y + viewport.h - h, .w = viewport.w, .h = h }, .right = false };
     }
 
     /// Re-apply property edits to a freshly built page; true when anything changed, in which case
@@ -472,14 +443,11 @@ pub const Devtools = struct {
     pub fn activate(self: *Devtools, gpa: std.mem.Allocator, id: u32) bool {
         if (id < first_id) return false;
         switch (id) {
-            tab_id...tab_id + 2 => self.tab = @enumFromInt(id - tab_id),
             inspect_id => self.inspecting = !self.inspecting,
-            close_id => self.toggle(),
             clear_id => {
                 self.line_count = 0;
                 self.line_head = 0;
             },
-            dock_id => self.dock = if (self.split(.{ .x = 0, .y = 0, .w = 1000, .h = 800 }).right and self.dock != .bottom) .bottom else .right,
             reset_id => self.resetSelected(gpa),
             clear_edits_id => self.clearEdits(gpa),
             expand_all_id => {
@@ -559,75 +527,65 @@ pub const Devtools = struct {
     }
     /// A page click while inspecting selects the element there; returns whether it was consumed.
     pub fn pointerDown(self: *Devtools, x: f32, y: f32) bool {
-        if (!self.open or !self.inspecting) return false;
+        if (!self.inspecting) return false;
         self.pick = .{ x, y };
         return true;
     }
 
-    /// Build the panel for `page` (already laid out) sized to `area`.
-    pub fn panel(self: *Devtools, b: L.Builder, gpa: std.mem.Allocator, font: *const Font, page: *L.Element, area: Rect, right: bool) !*L.Element {
+    /// Inspect `page` (already laid out) this frame: resolve the pointer and any pick against it.
+    /// Call before `view`, and keep `page` alive until `highlight`.
+    pub fn prepare(self: *Devtools, gpa: std.mem.Allocator, page: *const L.Element) !void {
         self.page = page;
         self.hovered = 0;
         if (self.pointer) |p| self.hovered = pathAt(page, root_path, p[0], p[1]) orelse 0;
-        if (self.pick) |p| {
-            self.pick = null;
-            self.inspecting = false;
-            if (pathAt(page, root_path, p[0], p[1])) |path| {
-                self.selected = path;
-                self.editing = null;
-                var trail: std.ArrayList(u64) = .empty;
-                defer trail.deinit(gpa);
-                _ = try find(page, root_path, path, &trail, gpa);
-                for (trail.items) |ancestor| if (!self.isOpen(ancestor)) {
-                    if (self.collapsed.contains(ancestor)) _ = self.collapsed.remove(ancestor) else try self.collapsed.put(gpa, ancestor, {});
-                };
-                self.scroll_to_selected = true;
-            }
-        }
-        // Wraps onto a second line when the panel is narrow.
-        const toolbar = try b.node(0, .{ .direction = .row, .wrap = true, .gap = 4, .align_items = .center, .padding = .{ .left = 6, .right = 6, .top = 4, .bottom = 4 } }, .none, &.{
-            try b.node(inspect_id, .{ .height = 28 }, .{ .toggle_button = .{ .label = "Inspect", .pressed = self.inspecting } }, &.{}),
-            try b.node(0, .{ .width = 1, .height = 20 }, .separator, &.{}),
-            try tabButton(b, self.tab, .elements, "Elements"),
-            try tabButton(b, self.tab, .performance, "Performance"),
-            try tabButton(b, self.tab, .console, "Console"),
-            try b.node(dock_id, .{ .height = 28 }, .{ .button = .{ .label = "Dock", .variant = .ghost } }, &.{}),
-            blk: {
-                const close = try b.node(close_id, .{ .width = 28, .height = 28, .padding = .{ .left = 6, .right = 6, .top = 6, .bottom = 6 } }, .{ .button = .{ .label = "", .variant = .ghost } }, &.{try b.node(0, .{ .width = 16, .height = 16 }, .{ .icon = .x }, &.{})});
-                close.accessibility.label = "Close DevTools";
-                break :blk close;
-            },
-        });
-        // A layout root fills the rect it is given, so measure the wrapped toolbar by its children.
-        toolbar.layout(.{ .x = 0, .y = 0, .w = area.w, .h = area.h }, font);
-        var toolbar_h: f32 = 0;
-        for (toolbar.children) |child| toolbar_h = @max(toolbar_h, child.bounds.y + child.bounds.h);
-        toolbar_h += toolbar.style.padding.bottom;
-        toolbar.style.height = toolbar_h;
-        const body_h = @max(40, area.h - toolbar_h - 1);
-        const body = switch (self.tab) {
-            .elements => try self.elements(b, gpa, page, area.w, body_h, right),
-            .performance => try self.performance(b, page, area.w),
-            .console => try self.consoleView(b, area.w, body_h),
+        const p = self.pick orelse return;
+        self.pick = null;
+        self.inspecting = false;
+        const path = pathAt(page, root_path, p[0], p[1]) orelse return;
+        self.selected = path;
+        self.editing = null;
+        var trail: std.ArrayList(u64) = .empty;
+        defer trail.deinit(gpa);
+        _ = try find(page, root_path, path, &trail, gpa);
+        for (trail.items) |ancestor| if (!self.isOpen(ancestor)) {
+            if (self.collapsed.contains(ancestor)) _ = self.collapsed.remove(ancestor) else try self.collapsed.put(gpa, ancestor, {});
         };
-        const result = try b.node(panel_id, .{ .width = area.w, .height = area.h }, .{ .surface = .sidebar }, &.{ toolbar, try b.separator(), body });
-        result.accessibility = .{ .role = .region, .label = "DevTools" };
+        self.scroll_to_selected = true;
+    }
+
+    /// One tool, sized to `area`, for the page given to `prepare`.
+    pub fn view(self: *Devtools, b: L.Builder, gpa: std.mem.Allocator, tool: Tool, area: Rect) !*L.Element {
+        const page = self.page orelse return error.NotPrepared;
+        const body = switch (tool) {
+            .elements => try self.elements(b, gpa, page, area.w, area.h),
+            .performance => try self.performance(b, page, area.w),
+            .console => try self.consoleView(b, area.w, area.h),
+        };
+        const result = try b.node(view_id + @intFromEnum(tool), .{ .width = area.w, .height = area.h }, .none, &.{body});
+        result.accessibility = .{ .role = .region, .label = switch (tool) {
+            .elements => "Elements",
+            .performance => "Performance",
+            .console => "Console",
+        } };
         return result;
     }
 
-    fn elements(self: *Devtools, b: L.Builder, gpa: std.mem.Allocator, page: *L.Element, w: f32, h: f32, right: bool) !*L.Element {
+    fn elements(self: *Devtools, b: L.Builder, gpa: std.mem.Allocator, page: *const L.Element, w: f32, h: f32) !*L.Element {
         var rows: std.ArrayList(*L.Element) = .empty;
         self.row_count = 0;
         try self.treeRows(b, &rows, page, root_path, 0);
-        const tree_w = if (right) w else w * 0.5;
-        const tree_h = if (right) h * 0.5 else h;
+        // Tree beside the styles when the panel is wide, above them when it is tall.
+        const stacked = w < h * 1.2;
+        const tree_w = if (stacked) w else w * 0.5;
+        const tree_h = if (stacked) h * 0.5 else h;
         if (self.scroll_to_selected) {
             self.scroll_to_selected = false;
             if (std.mem.indexOfScalar(u64, self.rows[0..self.row_count], self.selected)) |index| {
                 self.tree_scroll.offset.y = @max(0, @as(f32, @floatFromInt(index)) * 22 - tree_h / 2);
             }
         }
-        const tree_tools = try b.node(0, .{ .direction = .row, .height = 28, .gap = 4, .align_items = .center, .padding = .{ .left = 6, .right = 6 } }, .none, &.{
+        const tree_tools = try b.node(0, .{ .direction = .row, .height = 28, .gap = 4, .align_items = .center, .padding = .{ .left = 4, .right = 6 } }, .none, &.{
+            try b.node(inspect_id, .{ .height = 24 }, .{ .toggle_button = .{ .label = "Inspect", .pressed = self.inspecting } }, &.{}),
             try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = try std.fmt.allocPrint(b.allocator, "{d} elements", .{count(page)}), .size = 12, .tone = .muted } }, &.{}),
             try b.node(expand_all_id, .{ .height = 24 }, .{ .button = .{ .label = "Expand all", .variant = .ghost } }, &.{}),
             try b.node(collapse_all_id, .{ .height = 24 }, .{ .button = .{ .label = "Collapse all", .variant = .ghost } }, &.{}),
@@ -636,12 +594,12 @@ pub const Devtools = struct {
         var trail: std.ArrayList(u64) = .empty;
         defer trail.deinit(gpa);
         const chosen = if (self.selected != 0) try find(page, root_path, self.selected, &trail, gpa) else null;
-        const details_w = if (right) w else w - tree_w - 1;
-        const details_h = if (right) h - tree_h - 1 else h;
+        const details_w = if (stacked) w else w - tree_w - 1;
+        const details_h = if (stacked) h - tree_h - 1 else h;
         const details = try @import("widgets.zig").scrollArea(b, .{ .x = 0, .y = 0, .w = details_w, .h = @max(24, details_h) }, &self.details_scroll, &.{if (chosen) |element| try self.styles(b, element) else try b.node(0, .{ .padding = .{ .left = 12, .top = 12, .right = 12 } }, .{ .text = .{ .value = "Select an element, or press Inspect and click the page.", .size = 12, .tone = .muted, .wrap = true } }, &.{})});
         const left = try b.node(0, .{ .width = tree_w }, .none, &.{ tree_tools, try b.separator(), tree });
-        const divider = try b.node(0, if (right) .{ .height = 1 } else .{ .width = 1 }, .separator, &.{});
-        return b.node(0, .{ .direction = if (right) .column else .row }, .none, &.{ left, divider, details });
+        const divider = try b.node(0, if (stacked) .{ .height = 1 } else .{ .width = 1 }, .separator, &.{});
+        return b.node(0, .{ .direction = if (stacked) .column else .row }, .none, &.{ left, divider, details });
     }
 
     fn treeRows(self: *Devtools, b: L.Builder, rows: *std.ArrayList(*L.Element), element: *const L.Element, path: u64, depth: usize) !void {
@@ -790,7 +748,6 @@ pub const Devtools = struct {
     pub fn highlight(self: *Devtools, c: *Canvas, gpa: std.mem.Allocator) !void {
         defer self.page = null;
         const page = self.page orelse return;
-        if (!self.open) return;
         const target = if (c.hot_id >= row_first and c.hot_id < row_first + self.row_count)
             self.rows[c.hot_id - row_first]
         else if (self.hovered != 0) self.hovered else self.selected;
@@ -816,19 +773,13 @@ pub const Devtools = struct {
         const label = std.fmt.bufPrint(&label_buffer, "{s}  {d:.0} x {d:.0}", .{ tagName(&tag_buffer, element), r.w, r.h }) catch return;
         const width = c.font.measure(label, 12) + 16;
         // Above the element, else below it, else just inside its top edge.
-        const view = element.clip;
-        const y = if (r.y - 26 >= view.y) r.y - 26 else if (r.y + r.h + 26 <= view.y + view.h) r.y + r.h + 4 else @max(view.y, r.y) + 4;
-        const tip = Rect{ .x = @max(view.x, r.x), .y = y, .w = width, .h = 22 };
+        const visible = element.clip;
+        const y = if (r.y - 26 >= visible.y) r.y - 26 else if (r.y + r.h + 26 <= visible.y + visible.h) r.y + r.h + 4 else @max(visible.y, r.y) + 4;
+        const tip = Rect{ .x = @max(visible.x, r.x), .y = y, .w = width, .h = 22 };
         try c.roundRect(tip, types.rgb(0x20, 0x21, 0x24), 4);
         try c.textIn(tip.inset(8), label, 12, .{ 0.93, 0.93, 0.93 }, .start);
     }
 };
-
-fn tabButton(b: L.Builder, current: Tab, tab: Tab, text: []const u8) !*L.Element {
-    const node = try b.node(tab_id + @intFromEnum(tab), .{ .height = 28 }, .{ .tab = .{ .label = text, .selected = current == tab } }, &.{});
-    node.accessibility.role = .tab;
-    return node;
-}
 
 fn caption(b: L.Builder, text: []const u8) !*L.Element {
     return b.node(0, .{}, .{ .text = .{ .value = text, .size = 12, .tone = .muted, .wrap = true } }, &.{});
@@ -890,6 +841,12 @@ pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comp
     sink.log(mapped, format, args);
 }
 
+fn showElements(tools: *Devtools, b: L.Builder, font: *const Font, page: *const L.Element, area: Rect) !*L.Element {
+    _ = font;
+    try tools.prepare(std.testing.allocator, page);
+    return tools.view(b, std.testing.allocator, .elements, area);
+}
+
 test "every element is listed, picks select the deepest one, and the console wraps" {
     var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
@@ -899,26 +856,24 @@ test "every element is listed, picks select the deepest one, and the console wra
     const button = try b.button(7, "Save");
     const page = try b.node(0, .{ .width = 400, .height = 300, .padding = .{ .left = 10, .top = 10 } }, .none, &.{ try b.text("Title"), try b.node(0, .{ .direction = .row }, .none, &.{button}) });
     page.layout(.{ .x = 0, .y = 0, .w = 400, .h = 300 }, &font);
-    var tools = Devtools{ .open = true };
+    var tools = Devtools{};
     defer tools.deinit(std.testing.allocator);
     const area = Rect{ .x = 400, .y = 0, .w = 380, .h = 300 };
-    const built = try tools.panel(b, std.testing.allocator, &font, page, area, true);
+    const built = try showElements(&tools, b, &font, page, area);
     try std.testing.expectEqual(@as(usize, 4), tools.row_count); // root, text, row, button
-    // The tree gets real room: the toolbar is a line or two, not the whole panel.
     built.layout(area, &font);
-    try std.testing.expect(built.children[0].bounds.h < 80);
-    try std.testing.expect(built.children[2].bounds.h > 200);
+    try std.testing.expect(built.find(inspect_id) != null);
     try std.testing.expect(tools.activate(std.testing.allocator, chevron_first + 2)); // fold the row
-    _ = try tools.panel(b, std.testing.allocator, &font, page, area, true);
+    _ = try showElements(&tools, b, &font, page, area);
     try std.testing.expectEqual(@as(usize, 3), tools.row_count);
     tools.inspecting = true;
     try std.testing.expect(tools.pointerDown(button.bounds.center().x, button.bounds.center().y));
-    _ = try tools.panel(b, std.testing.allocator, &font, page, area, true);
+    _ = try showElements(&tools, b, &font, page, area);
     try std.testing.expect(!tools.inspecting);
     try std.testing.expectEqual(@as(usize, 4), tools.row_count); // the pick unfolded the row again
     try std.testing.expectEqual(tools.rows[3], tools.selected);
     try std.testing.expect(tools.activate(std.testing.allocator, collapse_all_id));
-    _ = try tools.panel(b, std.testing.allocator, &font, page, area, true);
+    _ = try showElements(&tools, b, &font, page, area);
     try std.testing.expectEqual(@as(usize, 1), tools.row_count);
     try std.testing.expect(!tools.activate(std.testing.allocator, 12));
     for (0..console_lines + 5) |i| tools.log(.info, "line {d}", .{i});
@@ -933,7 +888,7 @@ test "every element is listed, picks select the deepest one, and the console wra
 test "property edits persist across rebuilds and can be stepped, cycled, typed and reset" {
     var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
-    var tools = Devtools{ .open = true };
+    var tools = Devtools{};
     defer tools.deinit(std.testing.allocator);
     const area = Rect{ .x = 400, .y = 0, .w = 380, .h = 600 };
     // A tiny immediate-mode app: the page is rebuilt from scratch every frame.
@@ -945,7 +900,7 @@ test "property edits persist across rebuilds and can be stepped, cycled, typed a
             const page = try b.node(0, .{ .width = 400, .height = 300 }, .none, &.{ try b.text("Title"), try b.button(7, "Save") });
             page.layout(.{ .x = 0, .y = 0, .w = 400, .h = 300 }, f);
             if (t.apply(page)) page.layout(.{ .x = 0, .y = 0, .w = 400, .h = 300 }, f);
-            _ = try t.panel(b, std.testing.allocator, f, page, .{ .x = 400, .y = 0, .w = 380, .h = 600 }, true);
+            _ = try showElements(t, b, f, page, .{ .x = 400, .y = 0, .w = 380, .h = 600 });
             return page;
         }
     };
@@ -994,10 +949,10 @@ test "the tree is one tab stop walked with arrow keys" {
     const b = L.Builder{ .allocator = arena.allocator() };
     const page = try b.node(0, .{}, .none, &.{ try b.text("A"), try b.node(0, .{}, .none, &.{try b.text("B")}) });
     page.layout(.{ .x = 0, .y = 0, .w = 300, .h = 200 }, &font);
-    var tools = Devtools{ .open = true };
+    var tools = Devtools{};
     defer tools.deinit(std.testing.allocator);
     const area = Rect{ .x = 300, .y = 0, .w = 300, .h = 400 };
-    _ = try tools.panel(b, std.testing.allocator, &font, page, area, true);
+    _ = try showElements(&tools, b, &font, page, area);
     try std.testing.expectEqual(@as(usize, 4), tools.row_count);
     tools.selected = tools.rows[0];
     try std.testing.expect(!tools.skipInTabOrder(row_first));
@@ -1006,10 +961,10 @@ test "the tree is one tab stop walked with arrow keys" {
     try std.testing.expectEqual(tools.rows[1], tools.selected);
     try std.testing.expectEqual(@as(?u32, row_first + 2), tools.treeKey(std.testing.allocator, row_first + 1, .down));
     _ = tools.treeKey(std.testing.allocator, row_first + 2, .left); // collapse the inner column
-    _ = try tools.panel(b, std.testing.allocator, &font, page, area, true);
+    _ = try showElements(&tools, b, &font, page, area);
     try std.testing.expectEqual(@as(usize, 3), tools.row_count);
     _ = tools.treeKey(std.testing.allocator, row_first + 2, .right);
-    _ = try tools.panel(b, std.testing.allocator, &font, page, area, true);
+    _ = try showElements(&tools, b, &font, page, area);
     try std.testing.expectEqual(@as(usize, 4), tools.row_count);
     try std.testing.expect(tools.treeKey(std.testing.allocator, 5, .down) == null);
 }
