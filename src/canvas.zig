@@ -5,6 +5,7 @@ const Font = @import("font.zig").Font;
 const Icon = @import("font.zig").Icon;
 const atlas_width = @import("font.zig").atlas_width;
 const atlas_height = @import("font.zig").atlas_height;
+const color_atlas_size = @import("font.zig").color_atlas_size;
 const Rect = types.Rect;
 const Color = types.Color;
 const Vertex = types.Vertex;
@@ -17,6 +18,10 @@ pub const Canvas = struct {
     clip: ?Rect = null,
     pixel_scale: [2]f32 = .{ 1, 1 },
     srgb_target: bool = false,
+    /// Element id that draws the keyboard focus ring; 0 for none.
+    focus_id: u32 = 0,
+    /// Element id under the pointer, painted in its hover state; 0 for none.
+    hot_id: u32 = 0,
 
     pub fn init(vertices: []Vertex, font: *const Font) Canvas {
         return .{ .vertices = vertices, .font = font };
@@ -30,33 +35,54 @@ pub const Canvas = struct {
     pub fn rectAlpha(self: *Canvas, r: Rect, color: Color, alpha: f32) !void {
         if (!std.math.isFinite(alpha) or alpha < 0 or alpha > 1) return error.InvalidAlpha;
         if (r.w <= 0 or r.h <= 0) return;
+        try self.quad(self.snapped(r), solid_uv, color, alpha, 0);
+    }
+    pub fn roundRect(self: *Canvas, r: Rect, color: Color, radius: f32) !void {
+        return self.roundRectAlpha(r, color, radius, 1);
+    }
+    /// Straight edges snap to physical pixels; corners are anti-aliased by the corner distance field.
+    pub fn roundRectAlpha(self: *Canvas, r: Rect, color: Color, radius: f32, alpha: f32) !void {
+        if (!std.math.isFinite(alpha) or alpha < 0 or alpha > 1) return error.InvalidAlpha;
+        if (r.w <= 0 or r.h <= 0) return;
+        const s = self.snapped(r);
+        const k = @max(0, @min(radius, @min(s.w, s.h) / 2));
+        if (k * @min(self.pixel_scale[0], self.pixel_scale[1]) < 1) return self.quad(s, solid_uv, color, alpha, 0);
+        try self.quad(.{ .x = s.x + k, .y = s.y, .w = s.w - 2 * k, .h = s.h }, solid_uv, color, alpha, 0);
+        try self.quad(.{ .x = s.x, .y = s.y + k, .w = k, .h = s.h - 2 * k }, solid_uv, color, alpha, 0);
+        try self.quad(.{ .x = s.x + s.w - k, .y = s.y + k, .w = k, .h = s.h - 2 * k }, solid_uv, color, alpha, 0);
+        try self.corners(s, k, color, alpha, 1);
+    }
+    /// A `width`-thick outline just inside `r`, anti-aliased like `roundRect`.
+    pub fn roundRectStroke(self: *Canvas, r: Rect, color: Color, radius: f32, width: f32) !void {
+        if (r.w <= 0 or r.h <= 0 or width <= 0) return;
+        const s = self.snapped(r);
+        const k = @max(width, @min(radius, @min(s.w, s.h) / 2));
+        try self.quad(.{ .x = s.x + k, .y = s.y, .w = s.w - 2 * k, .h = width }, solid_uv, color, 1, 0);
+        try self.quad(.{ .x = s.x + k, .y = s.y + s.h - width, .w = s.w - 2 * k, .h = width }, solid_uv, color, 1, 0);
+        try self.quad(.{ .x = s.x, .y = s.y + k, .w = width, .h = s.h - 2 * k }, solid_uv, color, 1, 0);
+        try self.quad(.{ .x = s.x + s.w - width, .y = s.y + k, .w = width, .h = s.h - 2 * k }, solid_uv, color, 1, 0);
+        try self.corners(s, k, color, 1, 1 + width / k);
+    }
+    fn corners(self: *Canvas, s: Rect, k: f32, color: Color, alpha: f32, mode: f32) !void {
+        const g = self.font.corner;
+        const tile_u = @as(f32, @floatFromInt(g.x)) / atlas_width;
+        const tile_v = @as(f32, @floatFromInt(g.y)) / atlas_height;
+        const du = @as(f32, @floatFromInt(g.w)) / atlas_width;
+        const dv = @as(f32, @floatFromInt(g.h)) / atlas_height;
+        // Negative extents mirror the top-left tile into the other corners.
+        try self.quad(.{ .x = s.x, .y = s.y, .w = k, .h = k }, .{ .x = tile_u, .y = tile_v, .w = du, .h = dv }, color, alpha, mode);
+        try self.quad(.{ .x = s.x + s.w - k, .y = s.y, .w = k, .h = k }, .{ .x = tile_u + du, .y = tile_v, .w = -du, .h = dv }, color, alpha, mode);
+        try self.quad(.{ .x = s.x, .y = s.y + s.h - k, .w = k, .h = k }, .{ .x = tile_u, .y = tile_v + dv, .w = du, .h = -dv }, color, alpha, mode);
+        try self.quad(.{ .x = s.x + s.w - k, .y = s.y + s.h - k, .w = k, .h = k }, .{ .x = tile_u + du, .y = tile_v + dv, .w = -du, .h = -dv }, color, alpha, mode);
+    }
+    fn snapped(self: *const Canvas, r: Rect) Rect {
         const sx = self.pixel_scale[0];
         const sy = self.pixel_scale[1];
         const x = @round(r.x * sx);
         const y = @round(r.y * sy);
         const right = @max(x + 1, @round((r.x + r.w) * sx));
         const bottom = @max(y + 1, @round((r.y + r.h) * sy));
-        try self.quad(.{ .x = x / sx, .y = y / sy, .w = (right - x) / sx, .h = (bottom - y) / sy }, .{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 }, color, alpha);
-    }
-    pub fn roundRect(self: *Canvas, r: Rect, color: Color, radius: f32) !void {
-        if (r.w <= 0 or r.h <= 0) return;
-        if (self.clip) |clip| {
-            const visible = r.intersection(clip);
-            if (visible.w <= 0 or visible.h <= 0) return;
-        }
-        const corner = @max(0, @min(radius, @min(r.w, r.h) / 2));
-        if (corner < 1) return self.rect(r, color);
-        try self.rect(.{ .x = r.x, .y = r.y + corner, .w = r.w, .h = r.h - 2 * corner }, color);
-        var y: f32 = 0;
-        while (y < corner) {
-            const band = @min(1 / @max(1, self.pixel_scale[1]), corner - y);
-            const dy = corner - y - band / 2;
-            const inset = corner - @sqrt(@max(0, corner * corner - dy * dy));
-            const strip = Rect{ .x = r.x + inset, .y = r.y + y, .w = r.w - 2 * inset, .h = band };
-            try self.rect(strip, color);
-            try self.rect(.{ .x = strip.x, .y = r.y + r.h - y - band, .w = strip.w, .h = band }, color);
-            y += band;
-        }
+        return .{ .x = x / sx, .y = y / sy, .w = (right - x) / sx, .h = (bottom - y) / sy };
     }
     pub fn outline(self: *Canvas, r: Rect, color: Color) !void {
         try self.rect(.{ .x = r.x, .y = r.y, .w = r.w, .h = 1 }, color);
@@ -71,22 +97,26 @@ pub const Canvas = struct {
             .y = @as(f32, @floatFromInt(glyph.y)) / atlas_height,
             .w = @as(f32, @floatFromInt(glyph.w)) / atlas_width,
             .h = @as(f32, @floatFromInt(glyph.h)) / atlas_height,
-        }, color, 1);
+        }, color, 1, 0);
     }
     pub fn text(self: *Canvas, x: f32, y: f32, value: []const u8, size: f32, color: Color) !void {
         if (size <= 0) return;
         const strike = self.font.strike(size);
-        const scale = size / strike.size;
+        const scale = self.font.strikeScale(strike, size);
         var at = x;
-        // ponytail: atlas covers printable ASCII; other Unicode codepoints show one fallback glyph until dynamic atlases are needed.
-        for (value) |byte| {
-            if (byte & 0xc0 == 0x80) continue;
-            const g = strike.glyph(byte);
+        var i: usize = 0;
+        while (i < value.len) {
+            const g = self.font.next(strike, value, &i);
+            // Color glyphs index the color atlas and keep their own colors.
+            const aw: f32 = if (g.color) color_atlas_size else atlas_width;
+            const ah: f32 = if (g.color) color_atlas_size else atlas_height;
             if (g.w > 0 and g.h > 0) try self.quad(
-                .{ .x = at + @as(f32, @floatFromInt(g.left)) * scale, .y = y + (strike.ascent - @as(f32, @floatFromInt(g.top))) * scale, .w = @as(f32, @floatFromInt(g.w)) * scale, .h = @as(f32, @floatFromInt(g.h)) * scale },
-                .{ .x = @as(f32, @floatFromInt(g.x)) / atlas_width, .y = @as(f32, @floatFromInt(g.y)) / atlas_height, .w = @as(f32, @floatFromInt(g.w)) / atlas_width, .h = @as(f32, @floatFromInt(g.h)) / atlas_height },
-                color,
+                // Glyph origins land on physical pixels so exact strikes sample 1:1.
+                .{ .x = @round((at + @as(f32, @floatFromInt(g.left)) * scale) * self.pixel_scale[0]) / self.pixel_scale[0], .y = @round((y + (strike.ascent - @as(f32, @floatFromInt(g.top))) * scale) * self.pixel_scale[1]) / self.pixel_scale[1], .w = @as(f32, @floatFromInt(g.w)) * scale, .h = @as(f32, @floatFromInt(g.h)) * scale },
+                .{ .x = @as(f32, @floatFromInt(g.x)) / aw, .y = @as(f32, @floatFromInt(g.y)) / ah, .w = @as(f32, @floatFromInt(g.w)) / aw, .h = @as(f32, @floatFromInt(g.h)) / ah },
+                if (g.color) .{ 1, 1, 1 } else color,
                 1,
+                if (g.color) -1 else 0,
             );
             at += g.advance * scale;
         }
@@ -99,13 +129,15 @@ pub const Canvas = struct {
             if (visible.w <= 0 or visible.h <= 0) return;
         }
         const ink = self.font.inkBounds(value, size);
+        // Vertical placement uses the cap height so neighbouring labels share a baseline.
+        const cap = self.font.inkBounds("H", size);
         const center = r.center();
         const x = switch (alignment) {
             .start => r.x - ink.x,
             .center => center.x - ink.x - ink.w / 2,
             .end => r.x + r.w - ink.x - ink.w,
         };
-        try self.text(x, center.y - ink.y - ink.h / 2, value, size, color);
+        try self.text(x, center.y - cap.y - cap.h / 2, value, size, color);
     }
     pub fn textWrappedIn(self: *Canvas, r: Rect, value: []const u8, size: f32, color: Color) !void {
         return self.textWrappedInAligned(r, value, size, color, .start);
@@ -123,7 +155,8 @@ pub const Canvas = struct {
             y += line_height;
         }
     }
-    fn quad(self: *Canvas, r: Rect, uv: Rect, color: Color, alpha: f32) !void {
+    const solid_uv = Rect{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 };
+    fn quad(self: *Canvas, r: Rect, uv: Rect, color: Color, alpha: f32, mode: f32) !void {
         if (r.w <= 0 or r.h <= 0) return;
         const visible = if (self.clip) |clip| r.intersection(clip) else r;
         if (visible.w <= 0 or visible.h <= 0) return;
@@ -138,10 +171,10 @@ pub const Canvas = struct {
         const v_start = uv.y + (visible.y - r.y) / r.h * uv.h;
         const u_end = uv.x + (visible.x + visible.w - r.x) / r.w * uv.w;
         const v_end = uv.y + (visible.y + visible.h - r.y) / r.h * uv.h;
-        const a = Vertex{ .position = .{ visible.x, visible.y }, .color = rgba, .uv = .{ u_start, v_start } };
-        const b = Vertex{ .position = .{ visible.x + visible.w, visible.y }, .color = rgba, .uv = .{ u_end, v_start } };
-        const c = Vertex{ .position = .{ visible.x + visible.w, visible.y + visible.h }, .color = rgba, .uv = .{ u_end, v_end } };
-        const d = Vertex{ .position = .{ visible.x, visible.y + visible.h }, .color = rgba, .uv = .{ u_start, v_end } };
+        const a = Vertex{ .position = .{ visible.x, visible.y }, .color = rgba, .uv = .{ u_start, v_start }, .mode = mode };
+        const b = Vertex{ .position = .{ visible.x + visible.w, visible.y }, .color = rgba, .uv = .{ u_end, v_start }, .mode = mode };
+        const c = Vertex{ .position = .{ visible.x + visible.w, visible.y + visible.h }, .color = rgba, .uv = .{ u_end, v_end }, .mode = mode };
+        const d = Vertex{ .position = .{ visible.x, visible.y + visible.h }, .color = rgba, .uv = .{ u_start, v_end }, .mode = mode };
         const triangles = [_]Vertex{ a, b, c, a, c, d };
         @memcpy(self.vertices[self.len..][0..6], &triangles);
         self.len += 6;
@@ -152,7 +185,7 @@ test "rectangle hit testing and geometry" {
     const r = Rect{ .x = 10, .y = 20, .w = 30, .h = 40 };
     try std.testing.expect(r.contains(10, 20));
     try std.testing.expect(!r.contains(40, 20));
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [6]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -162,7 +195,7 @@ test "rectangle hit testing and geometry" {
 }
 
 test "text ink is centered in its rectangle" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 32);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [32]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -183,7 +216,7 @@ test "text ink is centered in its rectangle" {
 }
 
 test "start and end aligned ink meets the corresponding bounds" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 32);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [32]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -202,7 +235,7 @@ test "start and end aligned ink meets the corresponding bounds" {
 }
 
 test "clip trims geometry to the viewport" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [6]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -215,7 +248,7 @@ test "clip trims geometry to the viewport" {
 }
 
 test "Lucide icon vertices use the font atlas and clip to their box" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 32);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [6]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -226,8 +259,8 @@ test "Lucide icon vertices use the font atlas and clip to their box" {
     try std.testing.expect(canvas.items()[0].uv[0] > 0);
 }
 
-test "solid rectangles snap to physical pixels without changing text vertices" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+test "solid rectangles and glyph origins snap to physical pixels" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [24]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -238,23 +271,38 @@ test "solid rectangles snap to physical pixels without changing text vertices" {
     const before = canvas.len;
     try canvas.text(1.2, 2.2, "A", 16, .{ 1, 1, 1 });
     const strike = font.strike(16);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.2) + @as(f32, @floatFromInt(strike.glyph('A').left)) * 16 / strike.size, canvas.items()[before].position[0], 0.001);
+    const x = canvas.items()[before].position[0] * 2;
+    try std.testing.expectEqual(@round(x), x);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.2) + @as(f32, @floatFromInt(strike.glyph('A').left)) * 16 / strike.size, canvas.items()[before].position[0], 0.5);
 }
 
-test "rounded rectangles leave corners empty and honor custom radius" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+test "strokes use ring corners and color glyphs sample the color atlas" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var vertices: [64]Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    try canvas.roundRectStroke(.{ .x = 0, .y = 0, .w = 40, .h = 20 }, .{ 1, 1, 1 }, 8, 2);
+    try std.testing.expectEqual(@as(usize, 8 * 6), canvas.len);
+    try std.testing.expectEqual(@as(f32, 1.25), canvas.items()[canvas.len - 1].mode);
+}
+
+test "rounded rectangles draw distance-field corners and honor custom radius" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [180]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
     try canvas.roundRect(.{ .x = 0, .y = 0, .w = 20, .h = 20 }, .{ 1, 1, 1 }, 5);
-    try std.testing.expect(canvas.len > 6);
+    try std.testing.expectEqual(@as(usize, 7 * 6), canvas.len);
+    var corners: usize = 0;
     for (canvas.items()) |vertex| {
-        try std.testing.expect(!(vertex.position[0] == 0 and vertex.position[1] == 0));
+        if (vertex.position[0] == 0 and vertex.position[1] == 0) try std.testing.expectEqual(@as(f32, 1), vertex.mode);
+        if (vertex.mode == 1) corners += 1;
     }
+    try std.testing.expectEqual(@as(usize, 4 * 6), corners);
 }
 
 test "sRGB target linearizes theme colors before framebuffer encoding" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [6]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -264,7 +312,7 @@ test "sRGB target linearizes theme colors before framebuffer encoding" {
 }
 
 test "translucent backdrop retains alpha and rejects invalid opacity" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [6]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);

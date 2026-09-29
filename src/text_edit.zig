@@ -564,7 +564,7 @@ test "word and hard-line navigation never split codepoints" {
     edit.selectAll();
     try std.testing.expectEqualDeep(Range{ .start = 0, .end = edit.len }, edit.selection().?);
     edit.moveDocumentEnd(false);
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     edit.moveVertical(&font, 16, .up, false);
     try std.testing.expectEqual(@as(usize, 13), edit.cursor);
@@ -624,7 +624,7 @@ test "bounded undo history retains fifteen prior edits" {
 }
 
 test "pointer placement uses the same wrapped geometry as caret painting" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var edit = try TextEdit(32).init("AéB\nx");
     const area = inputContentRect(.{ .x = 10, .y = 20, .w = 120, .h = 80 });
@@ -641,7 +641,7 @@ test "pointer placement uses the same wrapped geometry as caret painting" {
 }
 
 test "soft wrap and scroll map pointer positions to UTF-8 boundaries" {
-    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var edit = try TextEdit(32).init("ab é🙂z");
     const area = Rect{ .x = 20, .y = 30, .w = font.measure("ab ", 16) + 1, .h = 75 };

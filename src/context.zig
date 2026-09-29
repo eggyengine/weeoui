@@ -48,11 +48,15 @@ pub const Context = struct {
     activate: bool = false,
     /// Widget clicked by assistive technology this frame.
     a11y_clicked: u32 = 0,
+    /// Outline every clickable region in red, to check hit targets.
+    debug_hitboxes: bool = false,
+    /// Draw the focus ring: on after keyboard navigation, off after a click (like :focus-visible).
+    focus_visible: bool = false,
 
     const Open = struct { kind: Container, id: u32, children: std.ArrayList(*L.Element) = .empty };
 
     pub fn init(gpa: std.mem.Allocator) !Context {
-        return .{ .gpa = gpa, .font = try Font.init(gpa, @import("root.zig").default_font, 32), .arena = .init(gpa) };
+        return .{ .gpa = gpa, .font = try Font.init(gpa, @import("root.zig").default_font), .arena = .init(gpa) };
     }
 
     pub fn deinit(self: *Context) void {
@@ -70,12 +74,14 @@ pub const Context = struct {
             .pointer_move => |p| self.pointer = p,
             .pointer_down => |down| {
                 self.pointer = down.position;
+                self.focus_visible = false;
                 if (down.button == .left) self.clicked = true;
             },
             .pointer_up => |up| self.pointer = up.position,
             .key_down => |key| switch (key.key) {
                 .tab => if (!key.repeat) {
                     self.tab_moves += if (key.modifiers.shift) -1 else 1;
+                    self.focus_visible = true;
                 },
                 .enter, .space => if (!key.repeat) {
                     self.activate = true;
@@ -130,7 +136,7 @@ pub const Context = struct {
     pub fn button(self: *Context, text: []const u8) bool {
         const widget = self.focusable(text);
         const clicked = self.pressed(widget);
-        self.add(widget, .{ .width = 120, .height = 40 }, .{ .button = .{ .label = visible(text), .hot = self.hovered(widget), .focused = self.focus == widget } }, &.{});
+        self.add(widget, .{ .width = 120, .height = 40 }, .{ .button = .{ .label = visible(text), .hot = self.hovered(widget) } }, &.{});
         return clicked;
     }
 
@@ -139,7 +145,7 @@ pub const Context = struct {
         const widget = self.focusable(text);
         const changed = self.pressed(widget);
         if (changed) value.* = !value.*;
-        self.add(widget, .{ .height = 32 }, .{ .checkbox = .{ .label = visible(text), .checked = value.*, .focused = self.focus == widget } }, &.{});
+        self.add(widget, .{ .height = 32 }, .{ .checkbox = .{ .label = visible(text), .checked = value.* } }, &.{});
         return changed;
     }
 
@@ -174,7 +180,16 @@ pub const Context = struct {
             canvas.theme = self.theme;
             canvas.pixel_scale = self.pixel_scale;
             canvas.srgb_target = self.srgb_target;
+            canvas.focus_id = if (self.focus_visible) self.focus else 0;
+            canvas.hot_id = self.hoveredWidget();
             if (root.draw(&canvas)) {
+                if (self.debug_hitboxes) root.drawHitboxes(&canvas) catch |e| switch (e) {
+                    error.OutOfVertices => {
+                        try self.vertices.ensureTotalCapacity(self.gpa, self.vertices.capacity * 2);
+                        continue;
+                    },
+                    else => return e,
+                };
                 return canvas.items();
             } else |e| switch (e) {
                 error.OutOfVertices => try self.vertices.ensureTotalCapacity(self.gpa, self.vertices.capacity * 2),
@@ -205,6 +220,21 @@ pub const Context = struct {
         var seed: u64 = 0;
         for (self.stack.items) |open| seed = seed *% 31 +% open.id +% open.children.items.len;
         return @as(u32, @truncate(std.hash.Wyhash.hash(seed, text))) | 1;
+    }
+
+    /// Smallest last-frame widget under the pointer, so nested hit targets win.
+    fn hoveredWidget(self: *const Context) u32 {
+        var best: u32 = 0;
+        var area = std.math.inf(f32);
+        var it = self.last_bounds.iterator();
+        while (it.next()) |entry| {
+            const r = entry.value_ptr.*;
+            if (r.contains(self.pointer.x, self.pointer.y) and r.w * r.h < area) {
+                best = entry.key_ptr.*;
+                area = r.w * r.h;
+            }
+        }
+        return best;
     }
 
     fn hovered(self: *const Context, widget: u32) bool {

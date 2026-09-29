@@ -10,6 +10,7 @@ pub const Font = @import("font.zig").Font;
 pub const Icon = @import("font.zig").Icon;
 pub const atlas_width = @import("font.zig").atlas_width;
 pub const atlas_height = @import("font.zig").atlas_height;
+pub const color_atlas_size = @import("font.zig").color_atlas_size;
 pub const Canvas = @import("canvas.zig").Canvas;
 pub const text_edit = @import("text_edit.zig");
 pub const TextEdit = text_edit.TextEdit;

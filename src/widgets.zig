@@ -1,8 +1,11 @@
-//! Composed, frame-local widgets. Applications retain all interaction state.
+//! Composed, frame-local widgets covering the shadcn/ui component set.
+//! Applications retain all interaction state and pass it in every frame.
 const std = @import("std");
 const L = @import("layout.zig");
 const primitives = @import("components/primitives.zig");
 const Rect = @import("types.zig").Rect;
+const Icon = @import("font.zig").Icon;
+const ButtonVariant = @import("components/button.zig").Variant;
 
 pub const Choice = struct { id: u32, label: []const u8 };
 pub const Section = struct { id: u32, title: []const u8, open: bool = false, content: []const *L.Element = &.{} };
@@ -13,18 +16,41 @@ pub const MessageScrollOptions = struct {
     alignment: enum { start, center, end, nearest } = .nearest,
     margin: f32 = 0,
 };
+/// A row in a dropdown, context menu or menubar. `id` 0 with `.item` is a heading.
+pub const MenuItem = struct {
+    id: u32 = 0,
+    label: []const u8 = "",
+    shortcut: []const u8 = "",
+    kind: enum { item, checkbox, radio, label, separator, submenu } = .item,
+    checked: bool = false,
+    disabled: bool = false,
+    /// Children of a `.submenu`, shown to its right while it is open.
+    items: []const MenuItem = &.{},
+};
 
-pub fn field(b: L.Builder, id: u32, name: []const u8, opts: primitives.Input) !*L.Element {
+/// Place `popup` over the page next to `anchor` (below, or to the right for submenus).
+pub fn anchorTo(popup: *L.Element, anchor: *const L.Element, side: @FieldType(@FieldType(L.Overlay, "anchor"), "side"), z_index: i16) *L.Element {
+    popup.style.z_index = z_index;
+    popup.overlay = .{ .anchor = .{ .target = anchor, .side = side } };
+    return popup;
+}
+
+/// Label, control, then a helper line; an invalid input shows the helper as an error.
+pub fn field(b: L.Builder, id: u32, name: []const u8, description: []const u8, opts: primitives.Input) !*L.Element {
     const input = try b.input(id, opts);
     input.accessibility.label = name;
-    return b.node(0, .{ .gap = 8 }, .none, &.{ try b.label(name), input });
+    input.accessibility.description = if (description.len > 0) description else null;
+    if (description.len == 0) return b.node(0, .{ .gap = 8 }, .none, &.{ try b.label(name), input });
+    const helper = try b.node(0, .{}, .{ .text = .{ .value = description, .size = 13, .tone = .muted, .wrap = true } }, &.{});
+    if (opts.invalid) helper.paint_kind.text.tone = .foreground;
+    return b.node(0, .{ .gap = 8 }, .none, &.{ try b.label(name), input, helper });
 }
 
 pub fn inputGroup(b: L.Builder, id: u32, prefix: []const u8, opts: primitives.Input, suffix: []const u8) !*L.Element {
     return b.node(0, .{ .direction = .row, .height = 40, .gap = 8, .align_items = .center }, .none, &.{
-        try b.node(0, .{ .width = @as(f32, @floatFromInt(prefix.len)) * 12 }, .{ .text = .{ .value = prefix, .tone = .muted } }, &.{}),
+        try b.node(0, .{}, .{ .text = .{ .value = prefix, .tone = .muted } }, &.{}),
         try b.node(id, .{ .grow = 1, .height = 40 }, .{ .input = opts }, &.{}),
-        try b.node(0, .{ .width = @as(f32, @floatFromInt(suffix.len)) * 12 }, .{ .text = .{ .value = suffix, .tone = .muted } }, &.{}),
+        try b.node(0, .{}, .{ .text = .{ .value = suffix, .tone = .muted } }, &.{}),
     });
 }
 
@@ -42,14 +68,29 @@ pub fn inputOtp(b: L.Builder, first_id: u32, digits: []const u8, slots: usize) !
     return b.node(0, .{ .direction = .row, .gap = 8 }, .none, children);
 }
 
-pub fn select(b: L.Builder, id: u32, selected: []const u8, placeholder: []const u8) !*L.Element {
-    const result = try b.node(id, .{ .direction = .row, .height = 40, .align_items = .center }, .none, &.{
-        try b.node(0, .{ .height = 40, .grow = 1 }, .{ .input = .{ .value = selected, .placeholder = placeholder } }, &.{}),
-        try b.icon(.chevron_down),
+/// Field-looking trigger: value (or muted placeholder) with a chevron inside the box.
+fn selectBox(b: L.Builder, id: u32, value: []const u8, placeholder: []const u8, height: f32) !*L.Element {
+    const result = try b.node(id, .{ .direction = .row, .height = height, .align_items = .center, .gap = 8, .padding = .{ .left = 12, .right = 12 } }, .{ .input = .{} }, &.{
+        try b.node(0, .{ .grow = 1, .height = height }, .{ .text = .{ .value = if (value.len == 0) placeholder else value, .size = 14, .tone = if (value.len == 0) .muted else .foreground } }, &.{}),
+        try b.node(0, .{ .width = 16, .height = 16 }, .{ .icon = .chevron_down }, &.{}),
     });
-    result.accessibility = .{ .role = .button, .label = if (selected.len == 0) placeholder else selected };
     result.children[0].accessibility.role = .ignored;
     result.children[1].accessibility.role = .ignored;
+    return result;
+}
+
+pub fn select(b: L.Builder, id: u32, selected: []const u8, placeholder: []const u8) !*L.Element {
+    const result = try selectBox(b, id, selected, placeholder, 40);
+    result.accessibility = .{ .role = .button, .label = if (selected.len == 0) placeholder else selected };
+    return result;
+}
+
+/// A select without a popup: activating it (or arrow keys) steps through `options`, like a
+/// platform `<select>` rendered inline.
+pub fn nativeSelect(b: L.Builder, id: u32, options: []const []const u8, index: usize) !*L.Element {
+    if (index >= options.len) return error.InvalidSelection;
+    const result = try selectBox(b, id, options[index], "", 36);
+    result.accessibility = .{ .role = .button, .label = options[index], .description = "Press to choose the next option" };
     return result;
 }
 
@@ -71,9 +112,10 @@ pub fn tabs(b: L.Builder, choices: []const Choice, selected_id: u32, panels: []c
     for (choices, 0..) |choice, i| {
         if (choice.id == selected_id) selected = i;
         children[i] = try b.tab(choice.id, choice.label, choice.id == selected_id);
+        children[i].style.height = 32;
     }
     const index = selected orelse return error.InvalidSelection;
-    const bar = try b.node(0, .{ .direction = .row, .gap = 4 }, .none, children);
+    const bar = try b.node(0, .{ .direction = .row, .gap = 2, .padding = .{ .left = 3, .right = 3, .top = 3, .bottom = 3 } }, .{ .surface = .track }, children);
     bar.accessibility.role = .tab_list;
     const panel = try b.node(0, .{}, .none, &.{panels[index]});
     panel.accessibility.role = .tab_panel;
@@ -90,29 +132,59 @@ pub fn toggleGroup(b: L.Builder, choices: []const Choice, pressed_ids: []const u
 pub fn buttonGroup(b: L.Builder, choices: []const Choice) !*L.Element {
     const children = try b.allocator.alloc(*L.Element, choices.len);
     defer b.allocator.free(children);
-    for (choices, 0..) |choice, i| children[i] = try b.button(choice.id, choice.label);
+    for (choices, 0..) |choice, i| children[i] = try b.node(choice.id, .{ .height = 36 }, .{ .button = .{ .label = choice.label, .variant = .outline } }, &.{});
     return b.node(0, .{ .direction = .row, .gap = 4 }, .none, children);
 }
 
+/// Menu panel from plain choices; `highlighted_id` is the keyboard-highlighted row.
 pub fn menu(b: L.Builder, choices: []const Choice, highlighted_id: u32) !*L.Element {
-    if (choices.len == 0) return b.node(0, .{ .width = 220, .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 } }, .{ .surface = .menu }, &.{try b.label("No results")});
-    const children = try b.allocator.alloc(*L.Element, choices.len);
-    defer b.allocator.free(children);
-    for (choices, 0..) |choice, i| {
-        children[i] = try b.node(choice.id, .{ .height = 36 }, .{
-            .button = .{ .label = choice.label, .primary = false, .hot = choice.id == highlighted_id },
-        }, &.{});
-        children[i].accessibility.role = .menu_item;
+    const items = try b.allocator.alloc(MenuItem, choices.len);
+    defer b.allocator.free(items);
+    for (choices, items) |choice, *slot| slot.* = .{ .id = choice.id, .label = choice.label };
+    return menuItems(b, items, highlighted_id, 0);
+}
+
+/// Menu panel with shortcuts, separators, check/radio rows and submenus. The submenu whose
+/// id is `open_submenu` is attached to its row.
+pub fn menuItems(b: L.Builder, items: []const MenuItem, highlighted_id: u32, open_submenu: u32) !*L.Element {
+    if (items.len == 0) return b.node(0, .{ .width = 220, .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 } }, .{ .surface = .menu }, &.{try b.node(0, .{}, .{ .text = .{ .value = "No results", .tone = .muted, .size = 14 } }, &.{})});
+    var inset = false;
+    for (items) |entry| inset = inset or entry.kind == .checkbox or entry.kind == .radio;
+    var children: std.ArrayList(*L.Element) = .empty;
+    defer children.deinit(b.allocator);
+    for (items) |entry| {
+        if (entry.kind == .separator) {
+            try children.append(b.allocator, try b.node(0, .{ .height = 9, .padding = .{ .top = 4, .bottom = 4, .left = -4, .right = -4 } }, .none, &.{try b.separator()}));
+            continue;
+        }
+        const row = try b.node(if (entry.kind == .label) 0 else entry.id, .{ .height = if (entry.kind == .label) 28 else 32 }, .{ .menu_item = .{
+            .label = entry.label,
+            .shortcut = entry.shortcut,
+            .hot = entry.id != 0 and entry.id == highlighted_id,
+            .indicator = switch (entry.kind) {
+                .checkbox => if (entry.checked) .checked else .unchecked,
+                .radio => if (entry.checked) .radio_on else .radio_off,
+                else => if (inset) .inset else .none,
+            },
+            .submenu = entry.kind == .submenu,
+            .disabled = entry.disabled,
+            .heading = entry.kind == .label,
+        } }, &.{});
+        row.accessibility.disabled = entry.disabled;
+        if (entry.kind == .submenu) row.accessibility.expanded = entry.id == open_submenu;
+        try children.append(b.allocator, row);
+        if (entry.kind == .submenu and entry.id == open_submenu and entry.id != 0) {
+            const sub = try menuItems(b, entry.items, highlighted_id, open_submenu);
+            try children.append(b.allocator, anchorTo(sub, row, .right, 150));
+        }
     }
-    return b.node(0, .{ .width = 220, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 }, .gap = 2 }, .{ .surface = .menu }, children);
+    const result = try b.node(0, .{ .width = 240, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 }, .gap = 1 }, .{ .surface = .menu }, children.items);
+    return result;
 }
 
 pub fn dropdownMenu(b: L.Builder, anchor: *const L.Element, choices: []const Choice, highlighted_id: u32, open: bool) !?*L.Element {
     if (!open) return null;
-    const popup = try menu(b, choices, highlighted_id);
-    popup.style.z_index = 100;
-    popup.overlay = .{ .anchor = .{ .target = anchor } };
-    return popup;
+    return anchorTo(try menu(b, choices, highlighted_id), anchor, .bottom, 100);
 }
 
 pub fn contextMenu(b: L.Builder, point: ?@import("types.zig").Vec2, choices: []const Choice, highlighted_id: u32) !?*L.Element {
@@ -123,14 +195,60 @@ pub fn contextMenu(b: L.Builder, point: ?@import("types.zig").Vec2, choices: []c
     return popup;
 }
 
-pub fn combobox(b: L.Builder, id: u32, query: []const u8, choices: []const Choice, highlighted_id: u32, open: bool) !*L.Element {
-    if (!open) {
-        const input = try b.input(id, .{ .value = query, .placeholder = "Search..." });
-        input.accessibility.expanded = false;
-        return input;
+pub const MenubarMenu = struct { id: u32, label: []const u8, items: []const MenuItem };
+
+/// Desktop-style menu bar. `open_id` is the open menu's trigger id (0 when closed).
+pub fn menubar(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlighted_id: u32, open_submenu: u32) !*L.Element {
+    var children: std.ArrayList(*L.Element) = .empty;
+    defer children.deinit(b.allocator);
+    for (menus) |entry| {
+        const trigger = try b.node(entry.id, .{ .height = 30 }, .{ .button = .{ .label = entry.label, .variant = .ghost, .hot = entry.id == open_id } }, &.{});
+        trigger.accessibility = .{ .role = .button, .label = entry.label, .expanded = entry.id == open_id };
+        try children.append(b.allocator, trigger);
+        if (entry.id == open_id) try children.append(b.allocator, anchorTo(try menuItems(b, entry.items, highlighted_id, open_submenu), trigger, .bottom, 100));
     }
-    const input = try b.node(id, .{ .height = 40 }, .{ .input = .{ .value = query, .placeholder = "Search..." } }, &.{});
-    input.accessibility.expanded = true;
+    const bar = try b.node(0, .{ .direction = .row, .gap = 2, .height = 40, .align_items = .center, .padding = .{ .left = 4, .right = 4 } }, .{ .surface = .card }, children.items);
+    bar.accessibility.role = .menu;
+    return b.node(0, .{ .direction = .row }, .none, &.{bar});
+}
+
+pub const NavigationLink = struct { id: u32, title: []const u8, description: []const u8 = "" };
+/// A top-level entry: with `links` it opens a panel, without it is a plain link.
+pub const NavigationItem = struct { id: u32, label: []const u8, links: []const NavigationLink = &.{} };
+
+/// Website-style navigation: triggers open a two-column panel of described links.
+pub fn navigationMenu(b: L.Builder, items: []const NavigationItem, open_id: u32) !*L.Element {
+    var children: std.ArrayList(*L.Element) = .empty;
+    defer children.deinit(b.allocator);
+    for (items) |entry| {
+        const trigger = try b.node(entry.id, .{ .height = 36 }, .{ .button = .{ .label = entry.label, .variant = .ghost, .hot = entry.id == open_id } }, &.{});
+        trigger.accessibility = .{ .role = .button, .label = entry.label, .expanded = if (entry.links.len > 0) entry.id == open_id else null };
+        try children.append(b.allocator, trigger);
+        if (entry.id != open_id or entry.links.len == 0) continue;
+        const links = try b.allocator.alloc(*L.Element, entry.links.len);
+        defer b.allocator.free(links);
+        for (entry.links, links) |link, *slot| {
+            slot.* = try b.node(link.id, .{ .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 4 }, .hover, &.{
+                try b.node(0, .{}, .{ .text = .{ .value = link.title, .size = 14 } }, &.{}),
+                try b.node(0, .{}, .{ .text = .{ .value = link.description, .size = 13, .tone = .muted, .wrap = true } }, &.{}),
+            });
+            slot.*.accessibility = .{ .role = .button, .label = link.title, .description = link.description };
+            slot.*.children[0].accessibility.role = .ignored;
+            slot.*.children[1].accessibility.role = .ignored;
+        }
+        const panel = try b.node(0, .{ .width = 440, .padding = .{ .left = 6, .right = 6, .top = 6, .bottom = 6 }, .columns = 2, .gap = 4 }, .{ .surface = .popover }, links);
+        try children.append(b.allocator, anchorTo(panel, trigger, .bottom, 100));
+    }
+    const result = try b.node(0, .{ .direction = .row, .gap = 4 }, .none, children.items);
+    result.accessibility = .{ .role = .group, .label = "Navigation" };
+    return result;
+}
+
+/// Search field with a filtered menu below it while `open`. The field keeps its width either way.
+pub fn combobox(b: L.Builder, id: u32, query: []const u8, choices: []const Choice, highlighted_id: u32, open: bool) !*L.Element {
+    const input = try b.input(id, .{ .value = query, .placeholder = "Search..." });
+    input.accessibility.expanded = open;
+    if (!open) return input;
     const matching = try b.allocator.alloc(Choice, choices.len);
     defer b.allocator.free(matching);
     var count: usize = 0;
@@ -140,10 +258,7 @@ pub fn combobox(b: L.Builder, id: u32, query: []const u8, choices: []const Choic
         count += 1;
     }
     const popup = (try dropdownMenu(b, input, matching[0..count], highlighted_id, true)).?;
-    return b.node(0, .{ .width = 220, .gap = 4 }, .none, &.{
-        input,
-        popup,
-    });
+    return b.node(0, .{}, .none, &.{ input, popup });
 }
 fn containsIgnoreCase(value: []const u8, query: []const u8) bool {
     if (query.len > value.len) return false;
@@ -157,17 +272,20 @@ pub fn command(b: L.Builder, id: u32, query: []const u8, choices: []const Choice
     return combobox(b, id, query, choices, highlighted_id, true);
 }
 
+/// Collapsible: a trigger row that shows `content` beneath it while open.
 pub fn disclosure(b: L.Builder, id: u32, title: []const u8, open: bool, content: []const *L.Element) !*L.Element {
-    const header = try b.node(id, .{ .height = 40 }, .{ .button = .{ .label = title, .primary = false } }, &.{});
-    header.accessibility.expanded = open;
-    return b.node(0, .{ .gap = 8 }, .none, if (open) &.{ header, try b.node(0, .{ .padding = .{ .left = 12 } }, .none, content) } else &.{header});
+    const header = try b.node(id, .{ .height = 44 }, .{ .disclosure = .{ .label = title, .open = open } }, &.{});
+    return b.node(0, .{ .gap = 4 }, .none, if (open) &.{ header, try b.node(0, .{ .padding = .{ .bottom = 12 }, .gap = 8 }, .none, content) } else &.{header});
 }
 
 pub fn accordion(b: L.Builder, sections: []const Section) !*L.Element {
-    const children = try b.allocator.alloc(*L.Element, sections.len);
+    const children = try b.allocator.alloc(*L.Element, sections.len * 2);
     defer b.allocator.free(children);
-    for (sections, 0..) |section, i| children[i] = try disclosure(b, section.id, section.title, section.open, section.content);
-    return b.node(0, .{ .gap = 4 }, .none, children);
+    for (sections, 0..) |section, i| {
+        children[i * 2] = try disclosure(b, section.id, section.title, section.open, section.content);
+        children[i * 2 + 1] = try b.separator();
+    }
+    return b.node(0, .{}, .none, children);
 }
 
 pub fn scrollArea(b: L.Builder, viewport: Rect, state: *L.ScrollState, children: []const *L.Element) !*L.Element {
@@ -237,35 +355,28 @@ pub fn hoverCard(b: L.Builder, children: []const *L.Element) !*L.Element {
 pub fn popoverAt(b: L.Builder, anchor: *const L.Element, children: []const *L.Element) !*L.Element {
     const panel = try popover(b, children);
     panel.style.width = 220;
-    panel.style.z_index = 100;
-    panel.overlay = .{ .anchor = .{ .target = anchor } };
-    return panel;
+    return anchorTo(panel, anchor, .bottom, 100);
 }
 pub fn hoverCardAt(b: L.Builder, anchor: *const L.Element, children: []const *L.Element) !*L.Element {
     const panel = try hoverCard(b, children);
     panel.style.width = 240;
-    panel.style.z_index = 100;
-    panel.overlay = .{ .anchor = .{ .target = anchor } };
-    return panel;
+    return anchorTo(panel, anchor, .bottom, 100);
 }
 pub fn tooltip(b: L.Builder, text: []const u8) !*L.Element {
-    const result = try b.node(0, .{ .width = @max(96, @as(f32, @floatFromInt(text.len)) * 9 + 24), .padding = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 } }, .{ .surface = .tooltip }, &.{try b.label(text)});
+    const result = try b.node(0, .{ .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 6 } }, .{ .surface = .tooltip }, &.{try b.node(0, .{}, .{ .text = .{ .value = text, .size = 13 } }, &.{})});
     result.accessibility.label = text;
     return result;
 }
 pub fn tooltipAt(b: L.Builder, anchor: *const L.Element, text: []const u8) !*L.Element {
-    const panel = try tooltip(b, text);
-    panel.style.z_index = 200;
-    panel.overlay = .{ .anchor = .{ .target = anchor } };
-    return panel;
+    return anchorTo(try tooltip(b, text), anchor, .bottom, 200);
 }
 pub fn toast(b: L.Builder, title: []const u8, description: []const u8) !*L.Element {
     return toastWithAction(b, title, description, null);
 }
 fn toastWithAction(b: L.Builder, title: []const u8, description: []const u8, action: ?*L.Element) !*L.Element {
-    const heading = try b.label(title);
-    const details = try b.node(0, .{}, .{ .text = .{ .value = description, .tone = .muted, .wrap = true } }, &.{});
-    const result = try b.surface(.toast, if (action) |button| &.{ heading, details, button } else &.{ heading, details });
+    const title_node = try b.label(title);
+    const details = try b.node(0, .{}, .{ .text = .{ .value = description, .tone = .muted, .wrap = true, .size = 14 } }, &.{});
+    const result = try b.surface(.toast, if (action) |button| &.{ title_node, details, button } else &.{ title_node, details });
     result.accessibility.label = title;
     result.accessibility.description = description;
     result.accessibility.live = .polite;
@@ -277,7 +388,7 @@ pub fn toastAt(b: L.Builder, viewport: Rect, title: []const u8, description: []c
     return panel;
 }
 pub fn dismissibleToastAt(b: L.Builder, viewport: Rect, title: []const u8, description: []const u8, dismiss_id: u32) !*L.Element {
-    const panel = try toastWithAction(b, title, description, try b.button(dismiss_id, "Dismiss"));
+    const panel = try toastWithAction(b, title, description, try b.buttonVariant(dismiss_id, "Dismiss", .outline));
     try placeToast(panel, viewport);
     return panel;
 }
@@ -288,45 +399,92 @@ fn placeToast(panel: *L.Element, viewport: Rect) !void {
     panel.overlay = .{ .point = .init(viewport.x + viewport.w - panel.style.width.? - 8, viewport.y + 8) };
 }
 pub fn empty(b: L.Builder, title: []const u8, description: []const u8, action: ?*L.Element) !*L.Element {
-    const heading = try b.label(title);
-    const details = try b.node(0, .{}, .{ .text = .{ .value = description, .tone = .muted, .wrap = true } }, &.{});
-    return b.surface(.card, if (action) |a| &.{ heading, details, a } else &.{ heading, details });
+    const title_node = try b.label(title);
+    const details = try b.node(0, .{}, .{ .text = .{ .value = description, .tone = .muted, .wrap = true, .size = 14 } }, &.{});
+    const result = try b.node(0, .{ .gap = 12, .padding = .{ .left = 24, .right = 24, .top = 32, .bottom = 32 }, .align_items = .center }, .{ .surface = .card }, if (action) |a| &.{ title_node, details, a } else &.{ title_node, details });
+    title_node.paint_kind.text.alignment = .center;
+    details.paint_kind.text.alignment = .center;
+    return result;
 }
+/// Chat message: author avatar beside the name and body.
 pub fn message(b: L.Builder, author: []const u8, body: []const u8) !*L.Element {
-    return b.surface(.popover, &.{ try b.label(author), try b.node(0, .{}, .{ .text = .{ .value = body, .wrap = true } }, &.{}) });
+    const initials = author[0..@min(author.len, if (author.len > 0 and author[0] >= 0x80) std.unicode.utf8ByteSequenceLength(author[0]) catch 1 else 1)];
+    const avatar = try b.avatar(initials);
+    avatar.style.width = 32;
+    avatar.style.height = 32;
+    const result = try b.node(0, .{ .direction = .row, .gap = 12, .padding = .{ .top = 4, .bottom = 4 } }, .none, &.{
+        avatar,
+        try b.node(0, .{ .grow = 1, .gap = 2 }, .none, &.{
+            try b.node(0, .{}, .{ .text = .{ .value = author, .size = 13, .tone = .muted } }, &.{}),
+            try b.node(0, .{}, .{ .text = .{ .value = body, .size = 15, .wrap = true } }, &.{}),
+        }),
+    });
+    result.accessibility = .{ .role = .group, .label = author, .description = body };
+    return result;
 }
 pub fn sidebar(b: L.Builder, viewport_height: f32, children: []const *L.Element) !*L.Element {
     if (!std.math.isFinite(viewport_height) or viewport_height <= 0) return error.InvalidSize;
     return b.node(0, .{ .width = 240, .height = viewport_height, .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 16 }, .gap = 8 }, .{ .surface = .sidebar }, children);
 }
-pub fn attachment(b: L.Builder, id: u32, filename: []const u8) !*L.Element {
-    return b.node(0, .{ .direction = .row, .gap = 8 }, .none, &.{
-        try b.button(id, "Choose file"),
-        try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = filename, .tone = .muted } }, &.{}),
+
+pub const AttachmentState = enum { idle, uploading, processing, @"error", done };
+pub const AttachmentInfo = struct {
+    name: []const u8,
+    description: []const u8 = "",
+    state: AttachmentState = .done,
+    /// 0..1 while uploading.
+    progress: f32 = 0,
+    icon: Icon = .file,
+};
+
+/// File card: media, name, metadata or upload progress, and a remove action (`remove_id`, 0 for none).
+pub fn attachment(b: L.Builder, remove_id: u32, info: AttachmentInfo) !*L.Element {
+    if (!std.math.isFinite(info.progress) or info.progress < 0 or info.progress > 1) return error.InvalidProgress;
+    const media = try b.node(0, .{ .width = 40, .height = 40, .padding = .{ .left = 10, .right = 10, .top = 10, .bottom = 10 } }, .{ .surface = .track }, &.{try b.node(0, .{ .width = 20, .height = 20 }, .{ .icon = info.icon }, &.{})});
+    media.children[0].accessibility.role = .ignored;
+    const status = switch (info.state) {
+        .uploading => try std.fmt.allocPrint(b.allocator, "Uploading {d}%", .{@as(u32, @intFromFloat(@round(info.progress * 100)))}),
+        .processing => "Processing...",
+        .@"error" => "Upload failed",
+        .idle, .done => info.description,
+    };
+    const details = try b.node(0, .{ .grow = 1, .gap = 4 }, .none, &.{
+        try b.node(0, .{}, .{ .text = .{ .value = info.name, .size = 14 } }, &.{}),
+        try b.node(0, .{}, .{ .text = .{ .value = status, .size = 13, .tone = if (info.state == .@"error") .foreground else .muted } }, &.{}),
+        if (info.state == .uploading) blk: {
+            const bar = try b.progress(info.progress);
+            bar.style.height = 6;
+            break :blk bar;
+        } else try b.node(0, .{ .height = 0 }, .none, &.{}),
     });
+    const row = try b.node(0, .{ .direction = .row, .gap = 12, .align_items = .center, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 } }, .{ .surface = .card }, if (remove_id == 0) &.{ media, details } else &.{ media, details, try iconButton(b, remove_id, .x, "Remove attachment", .ghost) });
+    row.accessibility = .{ .role = .group, .label = info.name, .description = status };
+    return row;
 }
 
 pub fn kbd(b: L.Builder, shortcut: []const u8) !*L.Element {
     const mac = @import("builtin").os.tag == .macos;
     const label_text = if (mac and std.mem.startsWith(u8, shortcut, "Ctrl+")) shortcut[5..] else shortcut;
-    const result = try b.node(0, .{
-        .width = @max(48, @as(f32, @floatFromInt(label_text.len)) * 9 + 48),
-        .height = 28,
-        .padding = .{ .left = 8, .right = 8 },
-        .direction = .row,
-        .align_items = .center,
-        .gap = 4,
-    }, .{ .surface = .tooltip }, &.{ try b.icon(if (mac) .command else .keyboard), try b.node(0, .{}, .{ .text = .{ .value = label_text, .size = 14 } }, &.{}) });
+    var children: [2]*L.Element = undefined;
+    var count: usize = 0;
+    if (mac and label_text.len != shortcut.len) {
+        children[count] = try b.node(0, .{ .width = 12, .height = 12 }, .{ .icon = .command }, &.{});
+        count += 1;
+    }
+    children[count] = try b.node(0, .{}, .{ .text = .{ .value = label_text, .size = 12, .tone = .muted } }, &.{});
+    count += 1;
+    const result = try b.node(0, .{ .height = 22, .padding = .{ .left = 6, .right = 6 }, .direction = .row, .align_items = .center, .gap = 2 }, .{ .surface = .track }, children[0..count]);
     result.accessibility = .{ .role = .group, .label = shortcut };
-    return result;
+    return b.node(0, .{ .direction = .row }, .none, &.{result});
 }
 
+/// List row with optional leading media; highlights on hover when `id` is set.
 pub fn item(b: L.Builder, id: u32, title: []const u8, description: []const u8, leading: ?*L.Element) !*L.Element {
     const content = try b.node(0, .{ .grow = 1, .gap = 2 }, .none, &.{
         try b.label(title),
-        try b.node(0, .{}, .{ .text = .{ .value = description, .tone = .muted, .wrap = true } }, &.{}),
+        try b.node(0, .{}, .{ .text = .{ .value = description, .tone = .muted, .wrap = true, .size = 14 } }, &.{}),
     });
-    return b.node(id, .{ .direction = .row, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 }, .gap = 12 }, .none, if (leading) |icon| &.{ icon, content } else &.{content});
+    return b.node(id, .{ .direction = .row, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 }, .gap = 12, .align_items = .center }, .hover, if (leading) |icon| &.{ icon, content } else &.{content});
 }
 
 pub fn form(b: L.Builder, fields: []const *L.Element) !*L.Element {
@@ -404,18 +562,19 @@ pub fn dataTableWithOptions(b: L.Builder, headers: []const Choice, rows: []const
     const result = try tableWithOptions(b, labels, rows, options);
     for (headers, 0..) |header, i| {
         result.children[0].children[i].id = header.id;
+        result.children[0].children[i].paint_kind.text.link = true;
     }
     return result;
 }
 
-fn tableRow(b: L.Builder, values: []const []const u8, heading: bool) !*L.Element {
+fn tableRow(b: L.Builder, values: []const []const u8, header: bool) !*L.Element {
     const cells = try b.allocator.alloc(*L.Element, values.len);
     defer b.allocator.free(cells);
     for (values, 0..) |value, i| {
         cells[i] = try b.node(0, .{ .min_width = 96, .grow = 1, .height = 36, .padding = .{ .left = 12, .right = 12 } }, .{
-            .text = .{ .value = value, .tone = if (heading) .muted else .foreground },
+            .text = .{ .value = value, .size = 14, .tone = if (header) .muted else .foreground },
         }, &.{});
-        cells[i].accessibility.role = if (heading) .column_header else .cell;
+        cells[i].accessibility.role = if (header) .column_header else .cell;
     }
     const row = try b.node(0, .{ .direction = .row }, .none, cells);
     row.accessibility.role = .row;
@@ -425,31 +584,36 @@ fn tableRow(b: L.Builder, values: []const []const u8, heading: bool) !*L.Element
 pub fn carousel(b: L.Builder, previous_id: u32, next_id: u32, slides: []const *L.Element, selected: usize) !*L.Element {
     if (slides.len == 0 or selected >= slides.len) return error.InvalidSlide;
     const slide = try b.node(0, .{ .grow = 1, .min_width = 160 }, .none, &.{slides[selected]});
-    return b.node(0, .{ .direction = .row, .gap = 8 }, .none, &.{
-        try iconButton(b, previous_id, .chevron_left, "Previous slide"),
+    return b.node(0, .{ .direction = .row, .gap = 8, .align_items = .center }, .none, &.{
+        try iconButton(b, previous_id, .chevron_left, "Previous slide", .outline),
         slide,
-        try iconButton(b, next_id, .chevron_right, "Next slide"),
+        try iconButton(b, next_id, .chevron_right, "Next slide", .outline),
     });
 }
 
-fn iconButton(b: L.Builder, id: u32, icon: @import("font.zig").Icon, label: []const u8) !*L.Element {
-    const result = try b.node(id, .{ .width = 36, .height = 36, .padding = .{ .left = 6, .top = 6 } }, .{ .button = .{ .label = "", .primary = false } }, &.{try b.icon(icon)});
+pub fn iconButton(b: L.Builder, id: u32, icon: Icon, label: []const u8, variant: ButtonVariant) !*L.Element {
+    const result = try b.node(id, .{ .width = 36, .height = 36, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 } }, .{ .button = .{ .label = "", .variant = variant } }, &.{try b.node(0, .{ .width = 20, .height = 20 }, .{ .icon = icon }, &.{})});
+    result.children[0].accessibility.role = .ignored;
     result.accessibility.label = label;
     return result;
 }
 
+/// Path of links; every crumb is clickable and the last one marks the current page.
 pub fn breadcrumb(b: L.Builder, choices: []const Choice) !*L.Element {
     if (choices.len == 0) return error.EmptyChoices;
     const children = try b.allocator.alloc(*L.Element, choices.len * 2 - 1);
     defer b.allocator.free(children);
     for (choices, 0..) |choice, i| {
-        if (i > 0) children[i * 2 - 1] = try b.icon(.chevron_right);
-        children[i * 2] = try b.node(choice.id, .{ .width = @max(24, @as(f32, @floatFromInt(choice.label.len)) * 12) }, .{
-            .text = .{ .value = choice.label, .tone = if (i + 1 == choices.len) .foreground else .muted },
+        if (i > 0) children[i * 2 - 1] = try b.node(0, .{ .width = 16, .height = 16 }, .{ .icon = .chevron_right }, &.{});
+        const current = i + 1 == choices.len;
+        children[i * 2] = try b.node(choice.id, .{ .height = 24 }, .{
+            .text = .{ .value = choice.label, .size = 14, .tone = if (current) .foreground else .muted, .link = true },
         }, &.{});
-        if (i + 1 < choices.len) children[i * 2].accessibility.role = .button;
+        children[i * 2].accessibility = .{ .role = .button, .label = choice.label, .description = if (current) "Current page" else null };
     }
-    return b.node(0, .{ .direction = .row, .height = 32, .gap = 4 }, .none, children);
+    const result = try b.node(0, .{ .direction = .row, .height = 32, .gap = 6, .align_items = .center }, .none, children);
+    result.accessibility = .{ .role = .group, .label = "Breadcrumb" };
+    return result;
 }
 
 pub fn pagination(b: L.Builder, first_id: u32, current: u16, total: u16) !*L.Element {
@@ -457,7 +621,7 @@ pub fn pagination(b: L.Builder, first_id: u32, current: u16, total: u16) !*L.Ele
     var pages: [7]*L.Element = undefined;
     var count: usize = 0;
     if (current > 1) {
-        pages[count] = try iconButton(b, first_id, .chevron_left, "Previous page");
+        pages[count] = try iconButton(b, first_id, .chevron_left, "Previous page", .ghost);
         count += 1;
     }
     const start = @max(1, @as(u32, current) -| 2);
@@ -468,36 +632,46 @@ pub fn pagination(b: L.Builder, first_id: u32, current: u16, total: u16) !*L.Ele
         count += 1;
     }
     if (current < total) {
-        pages[count] = try iconButton(b, first_id + @as(u32, total) + 1, .chevron_right, "Next page");
+        pages[count] = try iconButton(b, first_id + @as(u32, total) + 1, .chevron_right, "Next page", .ghost);
         count += 1;
     }
     return b.node(0, .{ .direction = .row, .gap = 4 }, .none, pages[0..count]);
 }
 
 fn pageButton(b: L.Builder, id: u32, text: []const u8, active: bool) !*L.Element {
-    return b.node(id, .{ .width = 36, .height = 36 }, .{ .button = .{ .label = text, .primary = active } }, &.{});
+    return b.node(id, .{ .width = 36, .height = 36 }, .{ .button = .{ .label = text, .variant = if (active) .outline else .ghost } }, &.{});
 }
+
+const month_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 
 pub fn calendar(b: L.Builder, first_id: u32, date: Date) !*L.Element {
     return calendarWithWidth(b, first_id, date, 300);
 }
+/// Month grid. Ids from `first_id`: +1..31 days, +32/+33 previous/next month,
+/// +34/+35 earlier/later hour, +36/+37 earlier/later minute, +38/+39 previous/next year.
 pub fn calendarWithWidth(b: L.Builder, first_id: u32, date: Date, width: f32) !*L.Element {
     if (!std.math.isFinite(width) or width < 192) return error.InvalidSize;
     const days = try daysInMonth(date);
-    if (first_id > std.math.maxInt(u32) - 37) return error.InvalidDate;
+    if (first_id > std.math.maxInt(u32) - 39) return error.InvalidDate;
     const first = firstWeekday(date.year, date.month);
     const weeks: usize = (@as(usize, first) + days + 6) / 7;
     const children = try b.allocator.alloc(*L.Element, weeks + 3);
     defer b.allocator.free(children);
-    const heading = try std.fmt.allocPrint(b.allocator, "{d:0>4}-{d:0>2}", .{ date.year, date.month });
-    const previous = try iconButton(b, first_id + 32, .chevron_left, "Previous month");
-    const next_month = try iconButton(b, first_id + 33, .chevron_right, "Next month");
+    const month_label = try std.fmt.allocPrint(b.allocator, "{s} {d}", .{ month_names[date.month - 1], date.year });
+    const previous_year = try yearButton(b, first_id + 38, "\u{ab}", "Previous year");
+    const previous = try compactIconButton(b, first_id + 32, .chevron_left, "Previous month");
+    const next_month = try compactIconButton(b, first_id + 33, .chevron_right, "Next month");
+    const next_year = try yearButton(b, first_id + 39, "\u{bb}", "Next year");
     previous.accessibility.disabled = date.year == 1 and date.month == 1;
+    previous_year.accessibility.disabled = date.year == 1;
     next_month.accessibility.disabled = date.year == 9999 and date.month == 12;
-    children[0] = try b.node(0, .{ .height = 36, .direction = .row, .align_items = .center }, .none, &.{
+    next_year.accessibility.disabled = date.year == 9999;
+    children[0] = try b.node(0, .{ .height = 36, .direction = .row, .align_items = .center, .gap = 2 }, .none, &.{
+        previous_year,
         previous,
-        try b.node(0, .{ .width = width - 24 - 72, .height = 28 }, .{ .text = .{ .value = heading, .alignment = .center } }, &.{}),
+        try b.node(0, .{ .grow = 1, .height = 28 }, .{ .text = .{ .value = month_label, .size = 14, .alignment = .center } }, &.{}),
         next_month,
+        next_year,
     });
     const weekdays = [_][]const u8{ "Mo", "Tu", "We", "Th", "Fr", "Sa", "Su" };
     const day_width = (width - 24 - 6 * 4) / 7;
@@ -513,8 +687,7 @@ pub fn calendarWithWidth(b: L.Builder, first_id: u32, date: Date, width: f32) !*
                 slot.* = try b.node(0, .{ .width = day_width, .height = 36 }, .none, &.{});
             } else {
                 const label_text = try std.fmt.allocPrint(b.allocator, "{d}", .{day});
-                slot.* = try pageButton(b, first_id + day, label_text, day == date.day);
-                slot.*.style.width = day_width;
+                slot.* = try b.node(first_id + day, .{ .width = day_width, .height = 36 }, .{ .button = .{ .label = label_text, .variant = if (day == date.day) .default else .ghost } }, &.{});
                 day += 1;
             }
         }
@@ -524,17 +697,21 @@ pub fn calendarWithWidth(b: L.Builder, first_id: u32, date: Date, width: f32) !*
     children[weeks + 2] = try b.node(0, .{ .direction = .row, .gap = 4, .align_items = .center }, .none, &.{
         try compactIconButton(b, first_id + 34, .chevron_left, "Earlier hour"),
         try compactIconButton(b, first_id + 36, .chevron_left, "Earlier minute"),
-        try b.node(0, .{ .width = width - 24 - 4 * 24 - 4 * 4, .height = 32 }, .{ .text = .{ .value = clock, .alignment = .center } }, &.{}),
+        try b.node(0, .{ .grow = 1, .height = 32 }, .{ .text = .{ .value = clock, .alignment = .center } }, &.{}),
         try compactIconButton(b, first_id + 37, .chevron_right, "Later minute"),
         try compactIconButton(b, first_id + 35, .chevron_right, "Later hour"),
     });
     return b.node(0, .{ .width = width, .padding = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 }, .gap = 4 }, .{ .surface = .popover }, children);
 }
-fn compactIconButton(b: L.Builder, id: u32, icon: @import("font.zig").Icon, name: []const u8) !*L.Element {
-    const result = try iconButton(b, id, icon, name);
-    result.style = .{ .width = 24, .height = 28, .padding = .{ .left = 2, .top = 4 } };
-    result.children[0].style.width = 20;
-    result.children[0].style.height = 20;
+/// Guillemets tell year steps apart from the single month chevrons.
+fn yearButton(b: L.Builder, id: u32, text: []const u8, name: []const u8) !*L.Element {
+    const result = try b.node(id, .{ .width = 24, .height = 28 }, .{ .button = .{ .label = text, .variant = .ghost } }, &.{});
+    result.accessibility.label = name;
+    return result;
+}
+fn compactIconButton(b: L.Builder, id: u32, icon: Icon, name: []const u8) !*L.Element {
+    const result = try iconButton(b, id, icon, name, .ghost);
+    result.style = .{ .width = 24, .height = 28, .padding = .{ .left = 2, .right = 2, .top = 4, .bottom = 4 } };
     return result;
 }
 
@@ -551,10 +728,10 @@ fn daysInMonth(date: Date) !u8 {
     if (date.day > days) return error.InvalidDate;
     return days;
 }
-pub fn shiftMonth(date: Date, direction: enum { previous, next }) !Date {
+pub fn shiftMonth(date: Date, way: enum { previous, next }) !Date {
     _ = try daysInMonth(date);
     var changed = date;
-    switch (direction) {
+    switch (way) {
         .previous => {
             if (date.year == 1 and date.month == 1) return error.InvalidDate;
             if (date.month == 1) {
@@ -573,6 +750,36 @@ pub fn shiftMonth(date: Date, direction: enum { previous, next }) !Date {
     changed.day = @min(date.day, try daysInMonth(.{ .year = changed.year, .month = changed.month }));
     return changed;
 }
+pub fn shiftYear(date: Date, way: enum { previous, next }) !Date {
+    _ = try daysInMonth(date);
+    var changed = date;
+    switch (way) {
+        .previous => changed.year = std.math.sub(u16, date.year, 1) catch return error.InvalidDate,
+        .next => changed.year += 1,
+    }
+    if (changed.year == 0 or changed.year > 9999) return error.InvalidDate;
+    changed.day = @min(date.day, try daysInMonth(.{ .year = changed.year, .month = changed.month }));
+    return changed;
+}
+/// Parse "YYYY-MM-DD" with an optional "HH:MM"; surrounding and separating spaces are ignored.
+pub fn parseDate(text: []const u8) !Date {
+    var it = std.mem.tokenizeAny(u8, text, "-: \t");
+    var fields: [5]u16 = .{ 0, 0, 0, 0, 0 };
+    var count: usize = 0;
+    while (it.next()) |part| : (count += 1) {
+        if (count == fields.len) return error.InvalidDate;
+        fields[count] = std.fmt.parseInt(u16, part, 10) catch return error.InvalidDate;
+    }
+    if (count != 3 and count != 5) return error.InvalidDate;
+    if (fields[1] > 12 or fields[2] > 31 or fields[3] > 23 or fields[4] > 59) return error.InvalidDate;
+    const date = Date{ .year = fields[0], .month = @intCast(fields[1]), .day = @intCast(fields[2]), .hour = @intCast(fields[3]), .minute = @intCast(fields[4]) };
+    _ = try daysInMonth(date);
+    if (date.day == 0) return error.InvalidDate;
+    return date;
+}
+pub fn formatDate(allocator: std.mem.Allocator, date: Date) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}  {d:0>2}:{d:0>2}", .{ date.year, date.month, date.day, date.hour, date.minute });
+}
 
 pub fn datePicker(b: L.Builder, id: u32, first_day_id: u32, date: Date, open: bool) !*L.Element {
     return datePickerWithWidth(b, id, first_day_id, date, open, 300);
@@ -580,20 +787,188 @@ pub fn datePicker(b: L.Builder, id: u32, first_day_id: u32, date: Date, open: bo
 pub fn datePickerWithWidth(b: L.Builder, id: u32, first_day_id: u32, date: Date, open: bool, width: f32) !*L.Element {
     _ = try daysInMonth(date);
     if (!std.math.isFinite(width) or width < 192) return error.InvalidSize;
-    const label_text = if (date.day == 0) "" else try std.fmt.allocPrint(b.allocator, "{d:0>4}-{d:0>2}-{d:0>2}  {d:0>2}:{d:0>2}", .{ date.year, date.month, date.day, date.hour, date.minute });
+    const label_text = if (date.day == 0) "" else try formatDate(b.allocator, date);
     const input = try b.input(id, .{ .value = label_text, .placeholder = "Pick a date" });
     input.style.width = width;
     input.accessibility.role = .button;
     input.accessibility.expanded = open;
     if (!open) return input;
     const popup = try calendarWithWidth(b, first_day_id, date, width);
-    popup.style.z_index = 100;
-    popup.overlay = .{ .anchor = .{ .target = input } };
-    return b.node(0, .{ .width = width }, .none, &.{ input, popup });
+    return b.node(0, .{ .width = width }, .none, &.{ input, anchorTo(popup, input, .bottom, 100) });
+}
+/// Date picker you can type into: `text` is the app-owned field (parse it with `parseDate`),
+/// `button_id` opens the calendar below it.
+pub fn datePickerInput(b: L.Builder, input_id: u32, button_id: u32, first_day_id: u32, date: Date, text: primitives.Input, open: bool, width: f32) !*L.Element {
+    _ = try daysInMonth(date);
+    if (!std.math.isFinite(width) or width < 192) return error.InvalidSize;
+    var opts = text;
+    if (opts.placeholder.len == 0) opts.placeholder = "YYYY-MM-DD HH:MM";
+    const input = try b.node(input_id, .{ .grow = 1, .height = 40 }, .{ .input = opts }, &.{});
+    input.accessibility.label = "Date";
+    const toggle = try iconButton(b, button_id, .calendar, "Open calendar", .outline);
+    toggle.style.width = 40;
+    toggle.style.height = 40;
+    toggle.style.padding = .{ .left = 10, .right = 10, .top = 10, .bottom = 10 };
+    toggle.accessibility.expanded = open;
+    const row = try b.node(0, .{ .width = width, .direction = .row, .gap = 6 }, .none, &.{ input, toggle });
+    if (!open) return row;
+    return b.node(0, .{ .width = width }, .none, &.{ row, anchorTo(try calendarWithWidth(b, first_day_id, date, width), row, .bottom, 100) });
+}
+
+pub const BubbleOptions = struct {
+    alignment: enum { start, end } = .start,
+    variant: primitives.Bubble = .muted,
+    /// Shown in a pill under the bubble, e.g. "👍 2".
+    reactions: []const u8 = "",
+};
+
+/// Conversation bubble; `.end` sits on the right like the local user's messages.
+pub fn bubble(b: L.Builder, text: []const u8, options: BubbleOptions) !*L.Element {
+    const body = try b.node(0, .{ .max_width = 320, .padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 8 } }, .{ .bubble = options.variant }, &.{
+        try b.node(0, .{}, .{ .text = .{ .value = text, .size = 15, .wrap = true } }, &.{}),
+    });
+    body.accessibility = .{ .role = .group, .label = text };
+    body.children[0].accessibility.role = .ignored;
+    const stack = try b.node(0, .{ .gap = 2, .align_items = if (options.alignment == .end) .end else .start, .max_width = 320 }, .none, if (options.reactions.len == 0) &.{body} else &.{
+        body,
+        try b.node(0, .{ .direction = .row, .justify = if (options.alignment == .end) .end else .start }, .none, &.{try b.node(0, .{ .height = 22 }, .{ .badge = .{ .label = options.reactions, .variant = .outline } }, &.{})}),
+    });
+    return b.node(0, .{ .direction = .row, .justify = if (options.alignment == .end) .end else .start }, .none, &.{stack});
+}
+
+pub const MarkerVariant = enum { default, border, separator };
+
+/// Inline status or system note in a conversation.
+pub fn marker(b: L.Builder, text: []const u8, variant: MarkerVariant, icon: ?Icon) !*L.Element {
+    const label_node = try b.node(0, .{}, .{ .text = .{ .value = text, .size = 13, .tone = .muted } }, &.{});
+    const content = if (icon) |value| try b.node(0, .{ .direction = .row, .gap = 6, .align_items = .center }, .none, &.{
+        try b.node(0, .{ .width = 14, .height = 14 }, .{ .icon = value }, &.{}),
+        label_node,
+    }) else label_node;
+    const result = switch (variant) {
+        .default => try b.node(0, .{ .direction = .row, .height = 24, .align_items = .center }, .none, &.{content}),
+        .separator => try b.node(0, .{ .direction = .row, .height = 24, .gap = 12, .align_items = .center }, .none, &.{
+            try b.node(0, .{ .height = 1, .grow = 1 }, .separator, &.{}),
+            content,
+            try b.node(0, .{ .height = 1, .grow = 1 }, .separator, &.{}),
+        }),
+        .border => try b.node(0, .{}, .none, &.{
+            try b.separator(),
+            try b.node(0, .{ .direction = .row, .height = 36, .align_items = .center, .padding = .{ .left = 4 } }, .none, &.{content}),
+            try b.separator(),
+        }),
+    };
+    result.accessibility = .{ .role = .status, .label = text };
+    return result;
+}
+
+pub const Question = struct {
+    title: []const u8,
+    description: []const u8 = "",
+    choices: []const []const u8 = &.{},
+    multiple: bool = false,
+    optional: bool = false,
+    /// Show a free text answer under the choices.
+    freeform: bool = false,
+};
+
+/// One step of a multi-question form. Ids from `first_id`: +0..15 choices (A..P), +16 the free
+/// text input, +17 previous, +18 skip, +19 next (submit on the last step). `selected` is a
+/// bit per choice.
+pub fn questionnaire(b: L.Builder, first_id: u32, question: Question, index: usize, total: usize, selected: u16, answer: primitives.Input) !*L.Element {
+    if (total == 0 or index >= total or question.choices.len > 16 or first_id > std.math.maxInt(u32) - 20) return error.InvalidQuestion;
+    var children: std.ArrayList(*L.Element) = .empty;
+    defer children.deinit(b.allocator);
+    const progress_label = try std.fmt.allocPrint(b.allocator, "Question {d} of {d}", .{ index + 1, total });
+    try children.append(b.allocator, try b.node(0, .{}, .{ .text = .{ .value = progress_label, .size = 13, .tone = .muted } }, &.{}));
+    const bar = try b.progress(@as(f32, @floatFromInt(index + 1)) / @as(f32, @floatFromInt(total)));
+    bar.style.height = 6;
+    bar.accessibility.label = progress_label;
+    try children.append(b.allocator, bar);
+    try children.append(b.allocator, try b.node(0, .{}, .{ .text = .{ .value = question.title, .size = 18, .wrap = true } }, &.{}));
+    if (question.description.len > 0) try children.append(b.allocator, try b.node(0, .{}, .{ .text = .{ .value = question.description, .size = 14, .tone = .muted, .wrap = true } }, &.{}));
+    const letters = "ABCDEFGHIJKLMNOP";
+    for (question.choices, 0..) |choice, i| {
+        const on = selected & (@as(u16, 1) << @intCast(i)) != 0;
+        const key = try b.node(0, .{ .width = 24, .height = 24 }, .{ .badge = .{ .label = letters[i .. i + 1], .variant = if (on) .default else .outline } }, &.{});
+        const row = try b.node(first_id + @as(u32, @intCast(i)), .{ .direction = .row, .gap = 12, .align_items = .center, .height = 44, .padding = .{ .left = 10, .right = 10 } }, .{ .toggle_button = .{ .label = "", .pressed = on } }, &.{
+            key,
+            try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = choice, .size = 15 } }, &.{}),
+        });
+        row.accessibility = .{ .role = if (question.multiple) .checkbox else .radio, .label = choice };
+        key.accessibility.role = .ignored;
+        row.children[1].accessibility.role = .ignored;
+        try children.append(b.allocator, row);
+    }
+    if (question.freeform) {
+        var opts = answer;
+        if (opts.placeholder.len == 0) opts.placeholder = "Type your own answer";
+        const input = try b.input(first_id + 16, opts);
+        input.accessibility.label = "Your answer";
+        try children.append(b.allocator, input);
+    }
+    var actions: std.ArrayList(*L.Element) = .empty;
+    defer actions.deinit(b.allocator);
+    const previous = try b.buttonVariant(first_id + 17, "Previous", .outline);
+    previous.accessibility.disabled = index == 0;
+    try actions.append(b.allocator, previous);
+    try actions.append(b.allocator, try b.node(0, .{ .grow = 1 }, .none, &.{}));
+    if (question.optional) try actions.append(b.allocator, try b.buttonVariant(first_id + 18, "Skip", .ghost));
+    try actions.append(b.allocator, try b.buttonVariant(first_id + 19, if (index + 1 == total) "Submit" else "Next", .default));
+    try children.append(b.allocator, try b.node(0, .{ .direction = .row, .gap = 8, .padding = .{ .top = 4 } }, .none, actions.items));
+    const result = try b.node(0, .{ .gap = 10 }, .none, children.items);
+    result.accessibility = .{ .role = .group, .label = question.title };
+    return result;
+}
+
+/// Right-to-left (or left-to-right) region: rows mirror and start-aligned text moves right.
+pub fn textDirection(b: L.Builder, rtl: bool, children: []const *L.Element) !*L.Element {
+    return b.node(0, .{ .gap = 12, .rtl = rtl }, .none, children);
+}
+
+/// Typography: headings h1-h4 (h2 carries a rule underneath).
+pub fn heading(b: L.Builder, level: u3, text: []const u8) !*L.Element {
+    const size: f32 = switch (level) {
+        1 => 36,
+        2 => 28,
+        3 => 22,
+        else => 18,
+    };
+    const result = try b.node(0, .{}, .{ .text = .{ .value = text, .size = size, .wrap = true } }, &.{});
+    result.accessibility.role = .heading;
+    if (level != 2) return result;
+    return b.node(0, .{ .gap = 8 }, .none, &.{ result, try b.separator() });
+}
+pub fn paragraph(b: L.Builder, text: []const u8) !*L.Element {
+    return b.node(0, .{}, .{ .text = .{ .value = text, .size = 16, .wrap = true } }, &.{});
+}
+pub fn lead(b: L.Builder, text: []const u8) !*L.Element {
+    return b.node(0, .{}, .{ .text = .{ .value = text, .size = 20, .tone = .muted, .wrap = true } }, &.{});
+}
+pub fn muted(b: L.Builder, text: []const u8) !*L.Element {
+    return b.node(0, .{}, .{ .text = .{ .value = text, .size = 14, .tone = .muted, .wrap = true } }, &.{});
+}
+pub fn blockquote(b: L.Builder, text: []const u8) !*L.Element {
+    return b.node(0, .{ .direction = .row, .gap = 16 }, .none, &.{
+        try b.node(0, .{ .width = 2 }, .separator, &.{}),
+        try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = text, .size = 16, .tone = .muted, .wrap = true } }, &.{}),
+    });
+}
+pub fn list(b: L.Builder, entries: []const []const u8) !*L.Element {
+    const rows = try b.allocator.alloc(*L.Element, entries.len);
+    defer b.allocator.free(rows);
+    for (entries, rows) |entry, *row| row.* = try b.node(0, .{ .direction = .row, .gap = 10, .padding = .{ .left = 8 } }, .none, &.{
+        try b.node(0, .{ .width = 6 }, .{ .text = .{ .value = "\u{2022}", .size = 16 } }, &.{}),
+        try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = entry, .size = 16, .wrap = true } }, &.{}),
+    });
+    return b.node(0, .{ .gap = 6 }, .none, rows);
+}
+pub fn inlineCode(b: L.Builder, text: []const u8) !*L.Element {
+    return b.node(0, .{ .direction = .row }, .none, &.{try b.node(0, .{ .padding = .{ .left = 6, .right = 6, .top = 2, .bottom = 2 } }, .{ .surface = .track }, &.{try b.node(0, .{}, .{ .text = .{ .value = text, .size = 14 } }, &.{})})});
 }
 
 test "calendar lays out leap days and rejects invalid dates" {
-    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -624,7 +999,7 @@ test "calendar lays out leap days and rejects invalid dates" {
 }
 
 test "popup and status semantics, message log, and optional table lines" {
-    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -670,7 +1045,7 @@ test "popup and status semantics, message log, and optional table lines" {
 }
 
 test "message scroller finds stable IDs and aligns without unintended follow" {
-    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -696,7 +1071,7 @@ test "message scroller finds stable IDs and aligns without unintended follow" {
 }
 
 test "input suffix and breadcrumb labels fit their painted bounds" {
-    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -706,11 +1081,11 @@ test "input suffix and breadcrumb labels fit their painted bounds" {
     try std.testing.expect(group.children[2].bounds.w >= font.inkBounds("USD", 16).w);
     const path = try breadcrumb(b, &.{ .{ .id = 380, .label = "Home" }, .{ .id = 381, .label = "Components" } });
     path.layout(.{ .x = 0, .y = 0, .w = 400, .h = 32 }, &font);
-    try std.testing.expect(path.children[2].bounds.w >= font.inkBounds("Components", 16).w);
+    try std.testing.expect(path.children[2].bounds.w >= font.inkBounds("Components", 14).w);
 }
 
 test "composed widgets expose stable hit IDs and invalid input" {
-    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -728,8 +1103,8 @@ test "composed widgets expose stable hit IDs and invalid input" {
     try std.testing.expectError(error.InvalidTable, table(b, &.{"Name"}, &.{&.{ "Alice", "Extra" }}));
     const data = try dataTable(b, &.{.{ .id = 90, .label = "Name" }}, &.{&.{"Alice"}});
     data.layout(.{ .x = 0, .y = 0, .w = 200, .h = 80 }, &font);
-    const heading = data.find(90).?;
-    try std.testing.expect(data.hit(90, heading.bounds.center().x, heading.bounds.center().y));
+    const header = data.find(90).?;
+    try std.testing.expect(data.hit(90, header.bounds.center().x, header.bounds.center().y));
     const table_semantics = try @import("accessibility.zig").collect(arena.allocator(), data, 90);
     try std.testing.expectEqual(L.Accessibility.Role.table, table_semantics.nodes[0].role);
     try std.testing.expectEqual(L.Accessibility.Role.column_header, table_semantics.nodes[2].role);
@@ -743,4 +1118,42 @@ test "composed widgets expose stable hit IDs and invalid input" {
     const sheet = try modal(b, screen, .sheet, &.{try b.label("Properties")});
     sheet.layout(screen, &font);
     try std.testing.expectApproxEqAbs(@as(f32, 440), sheet.children[0].bounds.x, 0.01);
+}
+
+test "dates parse from typed text and years shift with leap-day clamping" {
+    const parsed = try parseDate(" 2024-02-29 13:05 ");
+    try std.testing.expectEqual(Date{ .year = 2024, .month = 2, .day = 29, .hour = 13, .minute = 5 }, parsed);
+    try std.testing.expectEqual(Date{ .year = 1999, .month = 12, .day = 31 }, try parseDate("1999-12-31"));
+    try std.testing.expectError(error.InvalidDate, parseDate("2023-02-29"));
+    try std.testing.expectError(error.InvalidDate, parseDate("2024-13-01"));
+    try std.testing.expectError(error.InvalidDate, parseDate("2024-01"));
+    try std.testing.expectError(error.InvalidDate, parseDate("2024-01-01 24:00"));
+    try std.testing.expectEqual(@as(u8, 28), (try shiftYear(parsed, .next)).day);
+    try std.testing.expectError(error.InvalidDate, shiftYear(.{ .year = 1, .month = 1, .day = 1 }, .previous));
+}
+
+test "menubar opens one menu with shortcuts, checks and an open submenu beside its row" {
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = L.Builder{ .allocator = arena.allocator() };
+    const share = [_]MenuItem{ .{ .id = 20, .label = "Email link" }, .{ .id = 21, .label = "Messages" } };
+    const file = [_]MenuItem{
+        .{ .id = 10, .label = "New Tab", .shortcut = "Ctrl+T" },
+        .{ .kind = .separator },
+        .{ .id = 11, .label = "Share", .kind = .submenu, .items = &share },
+        .{ .id = 12, .label = "Bookmarks", .kind = .checkbox, .checked = true },
+    };
+    const root = try b.node(0, .{}, .none, &.{try menubar(b, &.{ .{ .id = 1, .label = "File", .items = &file }, .{ .id = 2, .label = "Edit", .items = &.{} } }, 1, 10, 11)});
+    root.layout(.{ .x = 0, .y = 0, .w = 800, .h = 600 }, &font);
+    const trigger = root.find(1).?;
+    const new_tab = root.find(10).?;
+    const share_row = root.find(11).?;
+    const email = root.find(20).?;
+    try std.testing.expect(new_tab.bounds.y >= trigger.bounds.y + trigger.bounds.h);
+    try std.testing.expect(email.bounds.x >= share_row.bounds.x + share_row.bounds.w);
+    try std.testing.expect(root.find(2).?.bounds.x > trigger.bounds.x);
+    try std.testing.expectEqual(@FieldType(primitives.MenuItem, "indicator").checked, root.find(12).?.paint_kind.menu_item.indicator);
+    try std.testing.expect(new_tab.actionable() and root.find(12).?.actionable());
 }

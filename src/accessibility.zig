@@ -98,6 +98,11 @@ fn append(allocator: std.mem.Allocator, nodes: *std.ArrayList(Node), ids: *std.A
         .toggle_button => |value| node.toggled = value.pressed,
         .radio => |value| node.toggled = value.checked,
         .tab => |value| node.selected = value.selected,
+        .menu_item => |value| {
+            node.disabled = node.disabled or value.disabled;
+            if (value.indicator != .none and value.indicator != .inset) node.toggled = value.indicator == .checked or value.indicator == .radio_on;
+        },
+        .disclosure => |value| node.expanded = value.open,
         .slider => |value| {
             if (!std.math.isFinite(value.value) or value.value < 0 or value.value > 1) return error.InvalidValue;
             node.numeric_value = value.value;
@@ -121,7 +126,8 @@ fn append(allocator: std.mem.Allocator, nodes: *std.ArrayList(Node), ids: *std.A
 fn roleFor(paint: L.Paint) Role {
     return switch (paint) {
         .text, .badge => .label,
-        .button, .toggle_button => .button,
+        .button, .toggle_button, .disclosure => .button,
+        .menu_item => .menu_item,
         .checkbox => .checkbox,
         .toggle => .switch_control,
         .slider => .slider,
@@ -146,7 +152,10 @@ fn roleFor(paint: L.Paint) Role {
 fn labelFor(paint: L.Paint) []const u8 {
     return switch (paint) {
         .text => |value| value.value,
-        .badge, .avatar => |value| value,
+        .avatar => |value| value,
+        .badge => |value| value.label,
+        .menu_item => |value| value.label,
+        .disclosure => |value| value.label,
         .button => |value| value.label,
         .checkbox => |value| value.label,
         .toggle => |value| value.label,
@@ -158,7 +167,7 @@ fn labelFor(paint: L.Paint) []const u8 {
 }
 
 test "snapshot maps role, focus, state, clipping and custom semantics" {
-    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -187,7 +196,7 @@ test "snapshot maps role, focus, state, clipping and custom semantics" {
 }
 
 test "composed panels remain visible and invalid numeric state fails explicitly" {
-    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), 24);
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

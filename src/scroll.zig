@@ -20,7 +20,7 @@ pub const ScrollState = struct {
     following_messages: bool = false,
     messages_initialized: bool = false,
     pending_prepend: f32 = 0,
-    /// Paint a vertical bar over the viewport's right edge, shown only after recent scrolling.
+    /// Paint bars over the viewport's right and bottom edges, shown only after recent scrolling.
     overlay_bar: bool = false,
     /// Seconds the overlay bar stays visible; refreshed by scrolling, drained by `tick`.
     recent: f32 = 0,
@@ -44,7 +44,10 @@ pub const ScrollState = struct {
     pub fn updateLayout(self: *ScrollState, viewport: Rect, content: Vec2) void {
         self.viewport = viewport;
         self.content = content;
-        if (self.overlay_bar) self.vertical_bar = .{ .x = viewport.x + viewport.w - overlay_width, .y = viewport.y, .w = overlay_width, .h = viewport.h };
+        if (self.overlay_bar) {
+            self.vertical_bar = .{ .x = viewport.x + viewport.w - overlay_width, .y = viewport.y, .w = overlay_width, .h = viewport.h };
+            self.horizontal_bar = .{ .x = viewport.x, .y = viewport.y + viewport.h - overlay_width, .w = viewport.w, .h = overlay_width };
+        }
         if (self.message_mode) {
             if (content.y == 0) {
                 self.offset.y = 0;

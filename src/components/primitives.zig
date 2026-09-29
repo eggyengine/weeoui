@@ -7,9 +7,9 @@ const Color = types.Color;
 const Rect = types.Rect;
 const Vertex = types.Vertex;
 
-fn focusRing(c: *Canvas, r: Rect, radius: f32, color: Color) !void {
-    try c.roundRect(.{ .x = r.x - 3, .y = r.y - 3, .w = r.w + 6, .h = r.h + 6 }, color, radius + 3);
-    try c.roundRect(.{ .x = r.x - 2, .y = r.y - 2, .w = r.w + 4, .h = r.h + 4 }, c.theme.background, radius + 2);
+/// Keyboard focus indicator: a 2px ring 2px outside `r`, drawn over whatever is beneath.
+pub fn focusRing(c: *Canvas, r: Rect, radius: f32, color: Color) !void {
+    try c.roundRectStroke(.{ .x = r.x - 4, .y = r.y - 4, .w = r.w + 8, .h = r.h + 8 }, color, radius + 4, 2);
 }
 
 fn textIn(c: *Canvas, r: Rect, value: []const u8, size: f32, color: Color, alignment: Canvas.TextAlign) !void {
@@ -60,10 +60,10 @@ pub const Input = struct {
 pub fn drawInput(c: *Canvas, r: Rect, opts: Input) !void {
     if (r.w <= 0 or r.h <= 0) return;
     const radius = c.theme.radiusMd();
-    const border = if (opts.invalid) c.theme.destructive else c.theme.input;
-    if (opts.focused and !opts.disabled) try focusRing(c, r, radius, if (opts.invalid) c.theme.destructive else c.theme.ring);
+    const focused = opts.focused and !opts.disabled;
+    const border = if (opts.invalid) c.theme.destructive else if (focused) c.theme.ring else c.theme.input;
     try c.roundRect(r, border, radius);
-    try c.roundRect(r.inset(1), if (opts.disabled) c.theme.muted else c.theme.background, @max(0, radius - 1));
+    try c.roundRect(r.inset(1), if (opts.disabled) c.theme.muted else c.theme.card, @max(0, radius - 1));
     const area = text_edit.inputContentRect(r);
     const content = if (opts.value.len == 0) opts.placeholder else opts.value;
     const color = if (opts.disabled or opts.value.len == 0) c.theme.muted_foreground else c.theme.foreground;
@@ -168,7 +168,6 @@ fn paintInputSpan(c: *Canvas, layout: text_edit.TextLayout, view: text_edit.Text
 
 pub const Radio = struct {
     checked: bool = false,
-    focused: bool = false,
 };
 
 pub fn drawRadio(c: *Canvas, r: Rect, opts: Radio) !void {
@@ -176,9 +175,8 @@ pub fn drawRadio(c: *Canvas, r: Rect, opts: Radio) !void {
     if (size <= 0) return;
     const center = r.center();
     const circle = Rect{ .x = center.x - size / 2, .y = center.y - size / 2, .w = size, .h = size };
-    if (opts.focused) try focusRing(c, circle, size / 2, c.theme.ring);
     try c.roundRect(circle, if (opts.checked) c.theme.primary else c.theme.input, size / 2);
-    try c.roundRect(circle.inset(1), c.theme.background, @max(0, size / 2 - 1));
+    try c.roundRect(circle.inset(1), c.theme.card, @max(0, size / 2 - 1));
     if (opts.checked) {
         const dot = circle.inset(size * 0.35);
         try c.roundRect(dot, c.theme.primary, dot.w / 2);
@@ -242,52 +240,135 @@ pub fn drawAvatar(c: *Canvas, r: Rect, initials: []const u8) !void {
 pub const Tab = struct {
     label: []const u8,
     selected: bool = false,
-    focused: bool = false,
 };
 
 pub fn drawTab(c: *Canvas, r: Rect, opts: Tab) !void {
     if (r.w <= 0 or r.h <= 0) return;
     const radius = c.theme.radiusSm();
-    if (opts.focused) try focusRing(c, r, radius, c.theme.ring);
-    try c.roundRect(r, if (opts.selected) c.theme.border else c.theme.muted, radius);
-    if (opts.selected) try c.roundRect(r.inset(1), c.theme.background, @max(0, radius - 1));
+    if (opts.selected) try c.roundRect(r, c.theme.border, radius);
+    if (opts.selected) try c.roundRect(r.inset(1), c.theme.card, @max(0, radius - 1));
     try textIn(c, r.inset(6), opts.label, c.theme.small_text_size, if (opts.selected) c.theme.foreground else c.theme.muted_foreground, .center);
 }
 
 pub const ToggleButton = struct {
     label: []const u8,
     pressed: bool = false,
-    focused: bool = false,
 };
 
 pub fn drawToggleButton(c: *Canvas, r: Rect, opts: ToggleButton) !void {
     if (r.w <= 0 or r.h <= 0) return;
     const radius = c.theme.radiusMd();
-    if (opts.focused) try focusRing(c, r, radius, c.theme.ring);
-    try c.roundRect(r, if (opts.pressed) c.theme.accent else c.theme.border, radius);
-    if (!opts.pressed) try c.roundRect(r.inset(1), c.theme.background, @max(0, radius - 1));
+    try c.roundRect(r, if (opts.pressed) c.theme.accent else c.theme.input, radius);
+    if (!opts.pressed) try c.roundRect(r.inset(1), c.theme.card, @max(0, radius - 1));
     try textIn(c, r.inset(6), opts.label, c.theme.text_size, if (opts.pressed) c.theme.accent_foreground else c.theme.foreground, .center);
 }
 
-pub const Surface = enum { card, popover, dialog, tooltip, toast, menu, sidebar };
+/// `track` is the borderless muted strip behind tabs and segmented controls.
+pub const Surface = enum { card, popover, dialog, tooltip, toast, menu, sidebar, track };
 
-/// Tooltip uses primary/primary_foreground; card and toast use card/card_foreground,
-/// popover, dialog, and menu use popover/popover_foreground; sidebar uses muted/foreground.
+/// Tooltip inverts (foreground/background); card and toast use card/card_foreground;
+/// popover, dialog, and menu use popover/popover_foreground; sidebar and track use muted.
 pub fn drawSurface(c: *Canvas, r: Rect, surface: Surface) !void {
     const fill = switch (surface) {
         .card, .toast => c.theme.card,
-        .tooltip => c.theme.primary,
-        .sidebar => c.theme.muted,
+        .tooltip => c.theme.foreground,
+        .sidebar, .track => c.theme.muted,
         .popover, .dialog, .menu => c.theme.popover,
     };
     const radius = switch (surface) {
         .sidebar => @as(f32, 0),
         .tooltip => c.theme.radiusSm(),
-        .card, .dialog => c.theme.radiusLg(),
+        .card, .dialog, .track => c.theme.radiusLg(),
         .popover, .toast, .menu => c.theme.radiusMd(),
     };
+    switch (surface) {
+        .tooltip, .track => return c.roundRect(r, fill, radius),
+        // Floating surfaces get a soft two-step shadow.
+        .popover, .dialog, .menu, .toast => {
+            try c.roundRectAlpha(.{ .x = r.x, .y = r.y + 4, .w = r.w, .h = r.h }, .{ 0, 0, 0 }, radius + 2, 0.05);
+            try c.roundRectAlpha(.{ .x = r.x, .y = r.y + 1, .w = r.w, .h = r.h }, .{ 0, 0, 0 }, radius, 0.08);
+        },
+        else => {},
+    }
     try c.roundRect(r, c.theme.border, radius);
     try c.roundRect(r.inset(1), fill, @max(0, radius - 1));
+}
+
+pub const MenuItem = struct {
+    label: []const u8,
+    shortcut: []const u8 = "",
+    hot: bool = false,
+    indicator: enum { none, inset, unchecked, checked, radio_off, radio_on } = .none,
+    submenu: bool = false,
+    disabled: bool = false,
+    /// Non-interactive group heading.
+    heading: bool = false,
+};
+
+pub fn drawMenuItem(c: *Canvas, r: Rect, opts: MenuItem) !void {
+    const t = c.theme;
+    if (opts.hot and !opts.disabled) try c.roundRect(r, t.accent, t.radiusSm());
+    const color = if (opts.disabled or opts.heading) t.muted_foreground else if (opts.hot) t.accent_foreground else t.foreground;
+    var x = r.x + 8;
+    if (opts.indicator != .none) {
+        const box = Rect{ .x = x, .y = r.center().y - 8, .w = 16, .h = 16 };
+        switch (opts.indicator) {
+            .checked => try c.icon(box, .check, color),
+            .radio_on => try c.roundRect(box.inset(5), color, 3),
+            else => {},
+        }
+        x += 24;
+    }
+    const size = if (opts.heading) t.small_text_size else t.text_size;
+    var end = r.x + r.w - 8;
+    if (opts.submenu) {
+        try c.icon(.{ .x = end - 16, .y = r.center().y - 8, .w = 16, .h = 16 }, .chevron_right, color);
+        end -= 20;
+    }
+    if (opts.shortcut.len > 0) {
+        const width = c.font.measure(opts.shortcut, t.small_text_size);
+        try textIn(c, .{ .x = end - width, .y = r.y, .w = width, .h = r.h }, opts.shortcut, t.small_text_size, t.muted_foreground, .end);
+        end -= width + 12;
+    }
+    try textIn(c, .{ .x = x, .y = r.y, .w = @max(0, end - x), .h = r.h }, opts.label, size, color, .start);
+}
+
+/// Collapsible / accordion trigger: title with a chevron, underlined on hover.
+pub fn drawDisclosure(c: *Canvas, r: Rect, label: []const u8, open: bool, hot: bool) !void {
+    const t = c.theme;
+    try textIn(c, .{ .x = r.x, .y = r.y, .w = @max(0, r.w - 24), .h = r.h }, label, t.text_size, t.foreground, .start);
+    if (hot) {
+        const ink = c.font.inkBounds(label, t.text_size);
+        try c.rect(.{ .x = r.x, .y = r.center().y + ink.h / 2 + 2, .w = @min(ink.w, r.w - 24), .h = 1 }, t.foreground);
+    }
+    try c.icon(.{ .x = r.x + r.w - 18, .y = r.center().y - 8, .w = 16, .h = 16 }, if (open) .chevron_up else .chevron_down, t.muted_foreground);
+}
+
+/// shadcn/ui chat bubble variants.
+pub const Bubble = enum { default, secondary, muted, tinted, outline, ghost, destructive };
+
+pub fn bubbleForeground(t: types.Theme, variant: Bubble) Color {
+    return switch (variant) {
+        .default => t.primary_foreground,
+        .secondary => t.secondary_foreground,
+        .tinted => t.accent_foreground,
+        .destructive => types.onColor(t.destructive),
+        .muted, .outline, .ghost => t.foreground,
+    };
+}
+
+pub fn drawBubble(c: *Canvas, r: Rect, variant: Bubble) !void {
+    const t = c.theme;
+    const radius = t.radiusXl();
+    switch (variant) {
+        .default => try c.roundRect(r, t.primary, radius),
+        .secondary => try c.roundRect(r, t.secondary, radius),
+        .muted => try c.roundRect(r, t.muted, radius),
+        .tinted => try c.roundRect(r, t.accent, radius),
+        .destructive => try c.roundRect(r, t.destructive, radius),
+        .outline => try c.roundRectStroke(r, t.border, radius, 1),
+        .ghost => {},
+    }
 }
 
 pub const Alert = struct {
@@ -299,7 +380,7 @@ pub const Alert = struct {
 pub fn drawAlert(c: *Canvas, r: Rect, opts: Alert) !void {
     const radius = c.theme.radiusLg();
     try c.roundRect(r, if (opts.destructive) c.theme.destructive else c.theme.border, radius);
-    try c.roundRect(r.inset(1), c.theme.background, @max(0, radius - 1));
+    try c.roundRect(r.inset(1), c.theme.card, @max(0, radius - 1));
     const inner = r.inset(12);
     if (opts.description.len == 0) {
         try textIn(c, inner, opts.title, c.theme.text_size, if (opts.destructive) c.theme.destructive else c.theme.foreground, .start);
@@ -337,7 +418,7 @@ pub fn drawBarChart(c: *Canvas, r: Rect, values: []const f32) !void {
 }
 
 test "input clips long text to its bounds and restores the caller clip" {
-    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [1024]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -354,7 +435,7 @@ test "input clips long text to its bounds and restores the caller clip" {
 }
 
 test "focused input paints selection before glyphs and a clipped caret after them" {
-    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [2048]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -389,7 +470,7 @@ test "focused input paints selection before glyphs and a clipped caret after the
 }
 
 test "multiline input paints underlined preedit, empty-line caret, and clipped selection" {
-    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [4096]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -417,7 +498,7 @@ test "multiline input paints underlined preedit, empty-line caret, and clipped s
 }
 
 test "focused empty input retains placeholder beside caret and rejects invalid preedit" {
-    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [1024]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);
@@ -439,7 +520,7 @@ test "focused empty input retains placeholder beside caret and rejects invalid p
 }
 
 test "chart rejects invalid data before drawing and progress clamps to the track" {
-    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"), 24);
+    var font = try Font.init(std.testing.allocator, @embedFile("../assets/OpenSans-Regular.ttf"));
     defer font.deinit();
     var vertices: [512]Vertex = undefined;
     var canvas = Canvas.init(&vertices, &font);

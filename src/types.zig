@@ -2,7 +2,9 @@ const std = @import("std");
 
 pub const Color = [3]f32;
 pub const Vec2 = @import("eggenvector").Vec2;
-pub const Vertex = extern struct { position: [2]f32, color: [4]f32, uv: [2]f32 };
+/// How the fragment shader reads the atlas: 0 coverage, 1 distance-field fill, 1 + f a
+/// distance-field ring `f` of the radius thick, -1 the color atlas (emoji).
+pub const Vertex = extern struct { position: [2]f32, color: [4]f32, uv: [2]f32, mode: f32 = 0 };
 pub const Rect = struct {
     x: f32,
     y: f32,
@@ -23,6 +25,12 @@ pub const Rect = struct {
         return .{ .x = self.x + amount, .y = self.y + amount, .w = @max(0, self.w - 2 * amount), .h = @max(0, self.h - 2 * amount) };
     }
 };
+
+/// Near-black or white, whichever reads better on `fill`.
+pub fn onColor(fill: Color) Color {
+    const luma = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2];
+    return if (luma > 0.55) .{ 0.08, 0.07, 0.06 } else .{ 1, 1, 1 };
+}
 
 pub fn rgb(r: u8, g: u8, b: u8) Color {
     return .{ @as(f32, @floatFromInt(r)) / 255, @as(f32, @floatFromInt(g)) / 255, @as(f32, @floatFromInt(b)) / 255 };
@@ -56,49 +64,49 @@ pub fn linearChannel(srgb: f32) f32 {
     return if (c <= 0.04045) c / 12.92 else std.math.pow(f32, (c + 0.055) / 1.055, 2.4);
 }
 
-/// Neutral light tokens from https://ui.shadcn.com/docs/theming
+/// Warm "Yolk" tokens; names follow https://ui.shadcn.com/docs/theming.
 pub const Theme = struct {
-    background: Color = oklch(1, 0, 0),
-    foreground: Color = oklch(0.145, 0, 0),
-    card: Color = oklch(1, 0, 0),
-    card_foreground: Color = oklch(0.145, 0, 0),
-    popover: Color = oklch(1, 0, 0),
-    popover_foreground: Color = oklch(0.145, 0, 0),
-    primary: Color = oklch(0.205, 0, 0),
-    primary_foreground: Color = oklch(0.985, 0, 0),
-    secondary: Color = oklch(0.97, 0, 0),
-    secondary_foreground: Color = oklch(0.205, 0, 0),
-    muted: Color = oklch(0.97, 0, 0),
-    muted_foreground: Color = oklch(0.556, 0, 0),
-    accent: Color = oklch(0.97, 0, 0),
-    accent_foreground: Color = oklch(0.205, 0, 0),
-    destructive: Color = oklch(0.577, 0.245, 27.325),
-    border: Color = oklch(0.922, 0, 0),
-    input: Color = oklch(0.922, 0, 0),
-    ring: Color = oklch(0.708, 0, 0),
+    background: Color = rgb(0xFA, 0xF7, 0xF2),
+    foreground: Color = rgb(0x1C, 0x19, 0x15),
+    card: Color = rgb(0xFF, 0xFF, 0xFF),
+    card_foreground: Color = rgb(0x1C, 0x19, 0x15),
+    popover: Color = rgb(0xFF, 0xFF, 0xFF),
+    popover_foreground: Color = rgb(0x1C, 0x19, 0x15),
+    primary: Color = rgb(0xF2, 0xB2, 0x33),
+    primary_foreground: Color = rgb(0x1C, 0x19, 0x15),
+    secondary: Color = rgb(0xF3, 0xEE, 0xE6),
+    secondary_foreground: Color = rgb(0x1C, 0x19, 0x15),
+    muted: Color = rgb(0xF3, 0xEE, 0xE6),
+    muted_foreground: Color = rgb(0x6B, 0x63, 0x58),
+    accent: Color = rgb(0xFC, 0xEF, 0xD2),
+    accent_foreground: Color = rgb(0x7A, 0x4E, 0x00),
+    destructive: Color = rgb(0xB4, 0x23, 0x18),
+    border: Color = rgb(0xE8, 0xE1, 0xD6),
+    input: Color = rgb(0xD8, 0xCE, 0xBF),
+    ring: Color = rgb(0xE6, 0xA0, 0x19),
     radius: f32 = 10,
-    text_size: f32 = 16,
-    small_text_size: f32 = 14,
+    text_size: f32 = 14,
+    small_text_size: f32 = 13,
 
     pub const dark: Theme = .{
-        .background = oklch(0.145, 0, 0),
-        .foreground = oklch(0.985, 0, 0),
-        .card = oklch(0.205, 0, 0),
-        .card_foreground = oklch(0.985, 0, 0),
-        .popover = oklch(0.205, 0, 0),
-        .popover_foreground = oklch(0.985, 0, 0),
-        .primary = oklch(0.922, 0, 0),
-        .primary_foreground = oklch(0.205, 0, 0),
-        .secondary = oklch(0.269, 0, 0),
-        .secondary_foreground = oklch(0.985, 0, 0),
-        .muted = oklch(0.269, 0, 0),
-        .muted_foreground = oklch(0.708, 0, 0),
-        .accent = oklch(0.269, 0, 0),
-        .accent_foreground = oklch(0.985, 0, 0),
-        .destructive = oklch(0.704, 0.191, 22.216),
-        .border = oklch(0.269, 0, 0),
-        .input = oklch(0.269, 0, 0),
-        .ring = oklch(0.556, 0, 0),
+        .background = rgb(0x15, 0x12, 0x0F),
+        .foreground = rgb(0xF3, 0xEE, 0xE6),
+        .card = rgb(0x1E, 0x1A, 0x16),
+        .card_foreground = rgb(0xF3, 0xEE, 0xE6),
+        .popover = rgb(0x1E, 0x1A, 0x16),
+        .popover_foreground = rgb(0xF3, 0xEE, 0xE6),
+        .primary = rgb(0xF5, 0xBE, 0x4A),
+        .primary_foreground = rgb(0x1A, 0x16, 0x11),
+        .secondary = rgb(0x29, 0x24, 0x1F),
+        .secondary_foreground = rgb(0xF3, 0xEE, 0xE6),
+        .muted = rgb(0x29, 0x24, 0x1F),
+        .muted_foreground = rgb(0xA6, 0x9C, 0x8F),
+        .accent = rgb(0x3A, 0x2E, 0x14),
+        .accent_foreground = rgb(0xF5, 0xC9, 0x69),
+        .destructive = rgb(0xF9, 0x70, 0x66),
+        .border = rgb(0x2E, 0x28, 0x23),
+        .input = rgb(0x43, 0x3B, 0x32),
+        .ring = rgb(0xF5, 0xBE, 0x4A),
     };
 
     pub fn radiusSm(self: Theme) f32 {

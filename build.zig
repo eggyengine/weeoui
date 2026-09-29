@@ -8,7 +8,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const freetype = b.dependency("freetype", .{ .target = target, .optimize = optimize });
+    // libpng decodes the PNG strikes inside color emoji fonts (Noto Color Emoji, Apple Color Emoji).
+    const freetype = b.dependency("freetype", .{ .target = target, .optimize = optimize, .@"enable-libpng" = true });
     const eggenvector = b.dependency("eggenvector", .{ .target = target, .optimize = optimize });
     mod.addImport("eggenvector", eggenvector.module("eggenvector"));
     mod.addImport("freetype", freetype.module("freetype"));
@@ -50,7 +51,7 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // `zig build counter -Dsdl3 -Dvitellus`: the README quick start as a runnable window.
+    // Both backends: `weeoui_sdl3.run` opens a window and draws with `weeoui_vitellus.Painter`.
     if (sdl3_dep != null and vitellus_dep != null) {
         const vitellus_module = vitellus_dep.?.module("vitellus");
         const sdl_window = b.createModule(.{
@@ -59,6 +60,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{ .{ .name = "vitellus", .module = vitellus_module }, .{ .name = "sdl3", .module = sdl3_dep.?.module("sdl3") } },
         });
+        adapter.?.addImport("vitellus", vitellus_module);
+        adapter.?.addImport("vitellus_sdl3", sdl_window);
+        adapter.?.addImport("weeoui_vitellus", renderer.?);
+        // `zig build counter -Dsdl3 -Dvitellus`: the README quick start as a runnable window.
         const counter = b.addExecutable(.{
             .name = "counter",
             .root_module = b.createModule(.{
@@ -69,9 +74,6 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "weeoui", .module = mod },
                     .{ .name = "weeoui_sdl3", .module = adapter.? },
-                    .{ .name = "weeoui_vitellus", .module = renderer.? },
-                    .{ .name = "vitellus", .module = vitellus_module },
-                    .{ .name = "vitellus_sdl3", .module = sdl_window },
                 },
             }),
             .use_llvm = true,
