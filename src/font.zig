@@ -406,18 +406,22 @@ pub const Font = struct {
         pub fn next(self: *Lines) ?[]const u8 {
             if (self.at >= self.value.len) return null;
             const start = self.at;
+            const selected = self.font.strike(self.size);
+            const scale = self.font.strikeScale(selected, self.size);
             var end = start;
+            var width: f32 = 0;
             var break_at: ?usize = null;
             while (end < self.value.len) {
                 if (self.value[end] == '\n') break;
                 if (self.value[end] == ' ') break_at = end;
-                const step = @min(self.value.len - end, std.unicode.utf8ByteSequenceLength(self.value[end]) catch 1);
-                // ponytail: quadratic for short UI labels; cache advances if long documents use this path.
-                if (end > start and self.font.measure(self.value[start .. end + step], self.size) > @max(1, self.width)) {
+                // Same left-to-right sum as `measure`, kept running instead of redone per byte.
+                var after = end;
+                width += self.font.next(selected, self.value, &after).advance * scale;
+                if (end > start and width > @max(1, self.width)) {
                     end = break_at orelse end;
                     break;
                 }
-                end += step;
+                end = after;
             }
             self.at = end;
             while (self.at < self.value.len and (self.value[self.at] == ' ' or self.value[self.at] == '\n')) self.at += 1;

@@ -6,10 +6,16 @@ const vit = @import("vitellus");
 const ui = @import("weeoui");
 const log = std.log.scoped(.renderer);
 
+/// How many frames the GPU may still be drawing while the CPU fills the next one.
+pub const frames_in_flight = 2;
+
 pub const Renderer = struct {
     device: vit.Device,
-    vertices: vit.Buffer,
-    capacity: usize,
+    /// One per frame in flight, so `upload` never writes what the GPU is still reading.
+    vertices: [frames_in_flight]vit.Buffer,
+    capacity: [frames_in_flight]usize,
+    /// Which of `vertices` the last `upload` filled and `draw` reads.
+    slot: usize = 0,
     pipeline_layout: vit.PipelineLayout,
     pipeline: vit.GraphicsPipeline,
     font_texture: vit.Texture,
@@ -20,7 +26,7 @@ pub const Renderer = struct {
     font_layout: vit.BindGroupLayout,
     font_group: vit.BindGroup,
     /// Created on the first atlas change: glyphs rasterized after `init` (Unicode, emoji).
-    staging: ?vit.Buffer = null,
+    staging: [frames_in_flight]?vit.Buffer = @splat(null),
     font_version: u32,
     font_needs_barrier: bool = true,
 
@@ -28,8 +34,12 @@ pub const Renderer = struct {
     /// sends them again whenever the font has rasterized new glyphs.
     pub fn init(device: vit.Device, color_format: vit.Format, font: *const ui.Font) !Renderer {
         const capacity = 4096;
-        const vertices = try createVertexBuffer(device, capacity);
-        errdefer vertices.deinit();
+        var vertices: [frames_in_flight]vit.Buffer = undefined;
+        for (&vertices, 0..) |*buffer, i| {
+            errdefer for (vertices[0..i]) |made| made.deinit();
+            buffer.* = try createVertexBuffer(device, capacity);
+        }
+        errdefer for (vertices) |buffer| buffer.deinit();
         const font_texture = try vit.Texture.init(device, .{ .label = "weeoui font", .width = ui.atlas_width, .height = ui.atlas_height, .format = .r8_unorm, .usage = .{ .sampled = true, .transfer_dst = true }, .initial_data = font.pixels });
         errdefer font_texture.deinit();
         const font_view = try vit.TextureView.init(device, .{ .texture = font_texture });
@@ -73,7 +83,7 @@ pub const Renderer = struct {
             .raster = .{ .cull_mode = .none },
             .layout = pipeline_layout,
         });
-        return .{ .device = device, .vertices = vertices, .capacity = capacity, .pipeline_layout = pipeline_layout, .pipeline = pipeline, .font_texture = font_texture, .font_view = font_view, .color_texture = color_texture, .color_view = color_view, .font_sampler = font_sampler, .font_layout = font_layout, .font_group = font_group, .font_version = font.version() };
+        return .{ .device = device, .vertices = vertices, .capacity = @splat(capacity), .pipeline_layout = pipeline_layout, .pipeline = pipeline, .font_texture = font_texture, .font_view = font_view, .color_texture = color_texture, .color_view = color_view, .font_sampler = font_sampler, .font_layout = font_layout, .font_group = font_group, .font_version = font.version() };
     }
 
     pub fn deinit(self: *Renderer) void {
@@ -86,13 +96,13 @@ pub const Renderer = struct {
         self.color_texture.deinit();
         self.font_view.deinit();
         self.font_texture.deinit();
-        if (self.staging) |staging| staging.deinit();
-        self.vertices.deinit();
+        for (self.staging) |staging| if (staging) |buffer| buffer.deinit();
+        for (self.vertices) |buffer| buffer.deinit();
     }
 
     /// Copy `vertices` (in `viewport` units) and any glyphs `font` gained to the GPU. Call outside
-    /// a render pass; the buffers grow as needed.
-    // ponytail: one upload buffer reused every frame; wait for the previous frame before calling, or add per-frame buffers.
+    /// a render pass; the buffers grow as needed. Each call takes the next of `frames_in_flight`
+    /// buffers: first wait for the GPU to finish the frame that uploaded `frames_in_flight` calls ago.
     pub fn upload(self: *Renderer, cmd: vit.CommandBuffer, font: *const ui.Font, vertices: []const ui.Vertex, viewport: ui.Rect) !void {
         if (self.font_needs_barrier) {
             try cmd.barrier(&.{
@@ -101,28 +111,30 @@ pub const Renderer = struct {
             });
             self.font_needs_barrier = false;
         }
+        self.slot = (self.slot + 1) % frames_in_flight;
         if (font.version() != self.font_version) try self.uploadAtlases(cmd, font);
-        if (vertices.len > self.capacity) {
+        if (vertices.len > self.capacity[self.slot]) {
             const capacity = std.math.ceilPowerOfTwoAssert(usize, vertices.len);
             const grown = try createVertexBuffer(self.device, capacity);
-            self.vertices.deinit();
-            self.vertices = grown;
-            self.capacity = capacity;
+            self.vertices[self.slot].deinit();
+            self.vertices[self.slot] = grown;
+            self.capacity[self.slot] = capacity;
         }
         if (vertices.len == 0) return;
         const size = vertices.len * @sizeOf(ui.Vertex);
-        const mapped = try self.vertices.map(.write, .{ .size = size });
+        const buffer = self.vertices[self.slot];
+        const mapped = try buffer.map(.write, .{ .size = size });
         const out: []ui.Vertex = @alignCast(std.mem.bytesAsSlice(ui.Vertex, mapped[0..size]));
         for (out, vertices) |*dst, src| dst.* = toClip(src, viewport);
-        self.vertices.unmap(.{ .size = size });
+        buffer.unmap(.{ .size = size });
     }
 
     // ponytail: re-sends both whole atlases (8 MB) when any glyph is added; track dirty rows if typing new scripts stutters.
     fn uploadAtlases(self: *Renderer, cmd: vit.CommandBuffer, font: *const ui.Font) !void {
         const gray = font.pixels.len;
         const total = gray + font.color_pixels.len;
-        if (self.staging == null) self.staging = try vit.Buffer.init(self.device, .{ .label = "weeoui glyph staging", .size = total, .usage = .{ .transfer_src = true }, .memory = .upload });
-        const staging = self.staging.?;
+        if (self.staging[self.slot] == null) self.staging[self.slot] = try vit.Buffer.init(self.device, .{ .label = "weeoui glyph staging", .size = total, .usage = .{ .transfer_src = true }, .memory = .upload });
+        const staging = self.staging[self.slot].?;
         const mapped = try staging.map(.write, .{ .size = total });
         @memcpy(mapped[0..gray], font.pixels);
         @memcpy(mapped[gray..total], font.color_pixels);
@@ -149,7 +161,7 @@ pub const Renderer = struct {
         cmd.setBindGroup(0, self.font_group, &.{});
         cmd.setViewport(.{ .width = @floatFromInt(extent.width), .height = @floatFromInt(extent.height) });
         cmd.setScissor(.{ .width = extent.width, .height = extent.height });
-        cmd.setVertexBuffer(0, self.vertices, 0);
+        cmd.setVertexBuffer(0, self.vertices[self.slot], 0);
         cmd.draw(@intCast(count), 1, @intCast(first), 0);
     }
 };
