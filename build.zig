@@ -14,6 +14,20 @@ pub fn build(b: *std.Build) void {
     mod.addImport("eggenvector", eggenvector.module("eggenvector"));
     mod.addImport("freetype", freetype.module("freetype"));
     mod.linkLibrary(freetype.artifact("freetype"));
+    // stb_image decodes PNG/JPEG/GIF/...; stb_image_resize2 fits them into the color atlas.
+    const stb = b.dependency("stb", .{});
+    mod.addIncludePath(stb.path(""));
+    mod.addCSourceFile(.{
+        .file = b.addWriteFiles().add("stb.c",
+            \\#define STB_IMAGE_IMPLEMENTATION
+            \\#define STBI_NO_STDIO
+            \\#include "stb_image.h"
+            \\#define STB_IMAGE_RESIZE_IMPLEMENTATION
+            \\#include "stb_image_resize2.h"
+        ),
+        // stb relies on shifts that UBSan traps on.
+        .flags = &.{"-fno-sanitize=undefined"},
+    });
     // Aro's `@cImport` rejects bionic's `_Nonnull` array parameters; zig-android-sdk does the same for translate-c.
     if (target.result.abi.isAndroid()) {
         for ([_]*std.Build.Module{ mod, freetype.module("freetype") }) |m| {
@@ -73,24 +87,48 @@ pub fn build(b: *std.Build) void {
         adapter.?.addImport("vitellus_sdl3", sdl_window);
         adapter.?.addImport("weeoui_vitellus", renderer.?);
         // `zig build counter -Dsdl3 -Dvitellus`: the README quick start as a runnable window.
-        const counter_module = b.createModule(.{
-            .root_source_file = b.path("examples/counter.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "weeoui", .module = mod },
-                .{ .name = "weeoui_sdl3", .module = adapter.? },
-            },
-        });
+        const counter_module = example(b, "counter", mod, adapter.?);
         const counter_step = b.step("counter", "Run the counter example (on Android: build, install and launch the APK)");
         if (target.result.abi.isAndroid()) {
             addAndroidCounter(b, counter_step, counter_module, vitellus_dep.?, sdl3_dep.?.module("sdl3"));
         } else {
-            const counter = b.addExecutable(.{ .name = "counter", .root_module = counter_module, .use_llvm = true });
-            counter_step.dependOn(&b.addRunArtifact(counter).step);
+            addDesktopExample(b, counter_step, "counter", counter_module);
+            // `zig build demo -Dsdl3 -Dvitellus`: the component gallery.
+            const demo = example(b, "demo", mod, adapter.?);
+            addDesktopExample(b, b.step("demo", "Run the component gallery"), "demo", demo);
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = demo, .use_llvm = true })).step);
         }
     }
+}
+
+fn example(b: *std.Build, name: []const u8, weeoui: *std.Build.Module, sdl3: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path(b.fmt("examples/{s}.zig", .{name})),
+        .target = weeoui.resolved_target,
+        .optimize = weeoui.optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "weeoui", .module = weeoui },
+            .{ .name = "weeoui_sdl3", .module = sdl3 },
+        },
+    });
+}
+
+/// Install `name` with `zig build` (so `-Dtarget=x86_64-windows` cross-builds land in zig-out/bin)
+/// and run the installed copy from `step`, so Windows finds accesskit.dll beside it.
+fn addDesktopExample(b: *std.Build, step: *std.Build.Step, name: []const u8, root_module: *std.Build.Module) void {
+    const exe = b.addExecutable(.{ .name = name, .root_module = root_module, .use_llvm = true });
+    const install = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install.step);
+    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
+    run.step.dependOn(&install.step);
+    if (b.named_lazy_paths.get("accesskit_dll")) |dll| {
+        const install_dll = b.addInstallBinFile(dll, "accesskit.dll");
+        b.getInstallStep().dependOn(&install_dll.step);
+        run.step.dependOn(&install_dll.step);
+    }
+    if (b.args) |args| run.addArgs(args);
+    step.dependOn(&run.step);
 }
 
 /// Android links everything into one shared `libmain.so`, so static libraries need PIC.

@@ -55,7 +55,7 @@ const weeoui_sdl3 = @import("weeoui_sdl3");
 
 pub fn main(init: std.process.Init) !void {
     var count: u32 = 0;
-    try weeoui_sdl3.run(init.gpa, .{ .title = "Counter" }, &count, frame);
+    try weeoui_sdl3.run(init.gpa, init.io, .{ .title = "Counter" }, &count, frame);
 }
 
 fn frame(count: *u32, ctx: *ui.Context) !void {
@@ -70,3 +70,24 @@ the runnable version is [`examples/counter.zig`](examples/counter.zig):
 ```bash
 zig build counter -Dsdl3 -Dvitellus
 ```
+
+## component gallery
+
+[`examples/demo.zig`](examples/demo.zig) shows every component through the same immediate-mode API: buttons, switches, sliders, forms, selects, dialogs, tables, charts, markdown, images and the colour picker.
+```bash
+zig build demo -Dsdl3 -Dvitellus
+```
+it builds and runs the same on windows. cross-compiling with `-Dtarget=x86_64-windows` puts `demo.exe` and the `accesskit.dll` it needs in `zig-out/bin/`.
+
+components without a `Context` wrapper are still one call away: build them with `ctx.builder()` and `ui.widgets`, add them with `ctx.element`, and use `ctx.idFor` / `ctx.activated` for clicks.
+
+## images
+
+`ui.Image.load` decodes PNG, JPEG, BMP, TGA, PSD, HDR, PNM and GIF (animated GIFs included) into the font's colour atlas, and `ctx.image` draws them. GIFs animate from `ctx.time_ms`:
+```zig
+var egg = try ui.Image.load(gpa, &ctx.font, @embedFile("egg.gif"));
+defer egg.deinit(gpa);
+// every frame:
+ctx.image(&egg, 128); // 128 wide, aspect kept
+```
+images share the atlas with colour emoji, so each one is capped at 512 px a side, and at a quarter of the atlas across all of its frames. larger ones are downscaled when loaded.

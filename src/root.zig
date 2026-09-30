@@ -16,7 +16,9 @@ pub const ColorEditor = @import("components/color_editor.zig").ColorEditor;
 pub const ColorChannel = @import("components/color_editor.zig").Channel;
 pub const Font = @import("font.zig").Font;
 pub const Icon = @import("font.zig").Icon;
+pub const Glyph = @import("font.zig").Glyph;
 pub const PlatformGlyph = @import("font.zig").PlatformGlyph;
+pub const Image = @import("image.zig").Image;
 pub const PlatformRenderer = @import("font.zig").PlatformRenderer;
 pub const atlas_width = @import("font.zig").atlas_width;
 pub const atlas_height = @import("font.zig").atlas_height;
@@ -43,6 +45,7 @@ pub const toggle = @import("components/toggle.zig");
 
 test {
     _ = @import("font.zig");
+    _ = @import("image.zig");
     _ = @import("canvas.zig");
     _ = @import("text_edit.zig");
     _ = @import("components/primitives.zig");

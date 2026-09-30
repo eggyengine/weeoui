@@ -19,7 +19,7 @@ pub const RunOptions = struct {
 /// Open a window and call `frame(state, ctx)` every frame until it is closed: the
 /// window, GPU, input, HiDPI and screen-reader plumbing are handled here.
 ///
-///     try weeoui_sdl3.run(gpa, .{ .title = "Counter" }, &count, struct {
+///     try weeoui_sdl3.run(init.gpa, init.io, .{ .title = "Counter" }, &count, struct {
 ///         fn frame(count: *u32, ctx: *ui.Context) !void {
 ///             ctx.label("Count: {d}", .{count.*});
 ///             if (ctx.button("Increment")) count.* += 1;
@@ -27,7 +27,7 @@ pub const RunOptions = struct {
 ///     }.frame);
 ///
 /// Needs the Vitellus renderer too (`-Dsdl3 -Dvitellus`).
-pub fn run(gpa: std.mem.Allocator, options: RunOptions, state: anytype, comptime frame: fn (@TypeOf(state), *ui.Context) anyerror!void) !void {
+pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anytype, comptime frame: fn (@TypeOf(state), *ui.Context) anyerror!void) !void {
     const vitellus_window = @import("vitellus_sdl3");
     const Painter = @import("weeoui_vitellus").Painter;
     try sdl3.init(.{ .video = true });
@@ -43,27 +43,40 @@ pub fn run(gpa: std.mem.Allocator, options: RunOptions, state: anytype, comptime
         if (options.emoji) if (sdl3.c.SDL_GetAndroidJNIEnv()) |env| {
             ctx.font.platform = @import("android_text.zig").renderer(env);
         };
-    } else if (options.emoji) _ = ctx.font.loadSystemEmoji(std.Io.Threaded.global_single_threaded.io());
-    var painter = try Painter.init(gpa, try window.asWindow(), try pixelSize(window.window), &ctx.font);
-    defer painter.deinit();
-    ctx.srgb_target = painter.srgb();
+    } else if (options.emoji) _ = ctx.font.loadSystemEmoji(io);
+    // Built while the window has a surface and dropped while backgrounded: Android destroys the
+    // surface when the app leaves the screen, and hands out a new one when it returns.
+    var painter: ?Painter = null;
+    defer if (painter) |*p| p.deinit();
+    var background = false;
+    var text_input = false;
     var scale: f32 = 1; // UI units per window point
+    const start = std.Io.Timestamp.now(io, .awake);
     while (true) {
+        if (background) try sdl3.events.wait(); // nothing to draw; sleep until something happens
         while (sdl3.events.poll()) |event| switch (event) {
-            .quit, .window_close_requested => return,
+            .quit, .window_close_requested, .terminating => return,
             .system_theme_changed => if (options.theme == null) {
                 ctx.theme = systemTheme();
             },
+            .will_enter_background => {
+                background = true;
+                if (painter) |*p| p.deinit();
+                painter = null;
+            },
+            .did_enter_foreground => background = false,
             else => handleScaledEvent(&ctx, event, scale),
         };
+        if (background) continue;
         const logical = try window.window.getSize();
         if (logical.@"0" == 0 or logical.@"1" == 0) {
             sdl3.timer.delayMilliseconds(16); // minimized
             continue;
         }
-        // Android windows report raw pixels with no density applied, so scale UI units up to
-        // the display's density there. ponytail: desktop keeps 1; Windows' DPI scale could use this too.
-        if (builtin.abi.isAndroid()) scale = (window.window.getDisplayScale() catch 1) / (window.window.getPixelDensity() catch 1);
+        // The display's content scale (Windows' 125-200% setting, Android's density, X11's Xft.dpi)
+        // that pixel density doesn't already cover: macOS and Wayland come out at 1.
+        scale = (window.window.getDisplayScale() catch 1) / (window.window.getPixelDensity() catch 1);
+        if (!(scale > 0) or !std.math.isFinite(scale)) scale = 1;
         const viewport = ui.Rect{ .x = 0, .y = 0, .w = @as(f32, @floatFromInt(logical.@"0")) / scale, .h = @as(f32, @floatFromInt(logical.@"1")) / scale };
         const pixels = try pixelSize(window.window);
         ctx.pixel_scale = .{ @as(f32, @floatFromInt(pixels.width)) / viewport.w, @as(f32, @floatFromInt(pixels.height)) / viewport.h };
@@ -71,8 +84,18 @@ pub fn run(gpa: std.mem.Allocator, options: RunOptions, state: anytype, comptime
         // Lay out inside the safe area so status bars and camera cutouts don't cover the UI.
         const safe = window.window.getSafeArea() catch null;
         ctx.newFrame(if (safe) |r| .{ .x = @as(f32, @floatFromInt(r.x)) / scale, .y = @as(f32, @floatFromInt(r.y)) / scale, .w = @as(f32, @floatFromInt(r.w)) / scale, .h = @as(f32, @floatFromInt(r.h)) / scale } else viewport);
+        if (painter == null) {
+            painter = try Painter.init(gpa, try window.asWindow(), pixels, &ctx.font);
+            ctx.srgb_target = painter.?.srgb();
+        }
+        ctx.time_ms = @intCast(@max(0, start.untilNow(io, .awake).toMilliseconds()));
         try frame(state, &ctx);
-        try painter.paint(pixels, &ctx.font, try ctx.render(), viewport, ctx.theme.background);
+        try painter.?.paint(pixels, &ctx.font, try ctx.render(), viewport, ctx.theme.background);
+        // Text events (and Android's on-screen keyboard) only while a text field has focus.
+        if (ctx.wants_text != text_input) {
+            text_input = ctx.wants_text;
+            (if (text_input) sdl3.keyboard.startTextInput(window.window) else sdl3.keyboard.stopTextInput(window.window)) catch {};
+        }
         setCursor(ctx.cursor);
     }
 }

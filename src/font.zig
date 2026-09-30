@@ -7,7 +7,7 @@ const log = std.log.scoped(.font);
 pub const atlas_width = 2048;
 pub const atlas_height = 2048;
 /// RGBA atlas holding color glyphs (emoji), filled on demand.
-pub const color_atlas_size = 1024;
+pub const color_atlas_size = 2048;
 /// One strike per pixel size where UI text lives so glyphs map 1:1 to screen pixels.
 // ponytail: sizes above 48px snap to the coarse list and scale; rasterize on demand if large text must be crisp.
 const strike_sizes = blk: {
@@ -304,11 +304,21 @@ pub const Font = struct {
         };
     }
 
-    fn packPlatform(self: *const Font, drawn: PlatformGlyph) !Glyph {
-        const at = self.dynamic.color_shelf.place(drawn.width, drawn.height) orelse return error.AtlasFull;
-        const row = @as(usize, drawn.width) * 4;
-        for (0..drawn.height) |y| @memcpy(self.color_pixels[((at[1] + y) * color_atlas_size + at[0]) * 4 ..][0..row], drawn.pixels[y * row ..][0..row]);
-        return .{ .x = @intCast(at[0]), .y = @intCast(at[1]), .w = drawn.width, .h = drawn.height, .top = drawn.top, .advance = drawn.advance, .color = true };
+    /// Pack straight-alpha, sRGB-encoded RGBA `pixels` (`width` x `height`) into the color atlas,
+    /// for `Canvas.image`. Returns the atlas region; `weeoui.Image` does this for decoded files.
+    // ponytail: atlas space is never reclaimed, so sprites live as long as the font; give images their own textures if apps churn through many.
+    pub fn addSprite(self: *Font, pixels: []const u8, width: u16, height: u16) !Glyph {
+        const sprite = try self.packRgba(pixels, width, height);
+        self.dynamic.version +%= 1;
+        return sprite;
+    }
+
+    fn packRgba(self: *const Font, pixels: []const u8, width: u16, height: u16) !Glyph {
+        const row = @as(usize, width) * 4;
+        if (pixels.len != row * height) return error.InvalidImageSize;
+        const at = self.dynamic.color_shelf.place(width, height) orelse return error.AtlasFull;
+        for (0..height) |y| @memcpy(self.color_pixels[((at[1] + y) * color_atlas_size + at[0]) * 4 ..][0..row], pixels[y * row ..][0..row]);
+        return .{ .x = @intCast(at[0]), .y = @intCast(at[1]), .w = width, .h = height, .color = true };
     }
 
     /// Rasterize `codepoint` at `selected`'s size from the main font, else the emoji font.
@@ -322,7 +332,10 @@ pub const Font = struct {
         }
         if (self.platform) |platform| if (platform.render(platform.context, self.allocator, codepoint, selected.size)) |drawn| {
             defer self.allocator.free(drawn.pixels);
-            return self.packPlatform(drawn);
+            var packed_glyph = try self.packRgba(drawn.pixels, drawn.width, drawn.height);
+            packed_glyph.top = drawn.top;
+            packed_glyph.advance = drawn.advance;
+            return packed_glyph;
         };
         const face = d.emoji_face orelse return error.MissingGlyph;
         const index = c.FT_Get_Char_Index(face, codepoint);

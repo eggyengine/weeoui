@@ -3,6 +3,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const Font = @import("font.zig").Font;
 const Icon = @import("font.zig").Icon;
+const Glyph = @import("font.zig").Glyph;
 const atlas_width = @import("font.zig").atlas_width;
 const atlas_height = @import("font.zig").atlas_height;
 const color_atlas_size = @import("font.zig").color_atlas_size;
@@ -98,6 +99,11 @@ pub const Canvas = struct {
             .w = @as(f32, @floatFromInt(glyph.w)) / atlas_width,
             .h = @as(f32, @floatFromInt(glyph.h)) / atlas_height,
         }, color, 1, 0);
+    }
+    /// Draw a color-atlas `sprite` (an `Image` frame or `Font.addSprite` result) stretched over `r`.
+    pub fn image(self: *Canvas, r: Rect, sprite: Glyph, alpha: f32) !void {
+        const size: f32 = color_atlas_size;
+        try self.quad(r, .{ .x = @as(f32, @floatFromInt(sprite.x)) / size, .y = @as(f32, @floatFromInt(sprite.y)) / size, .w = @as(f32, @floatFromInt(sprite.w)) / size, .h = @as(f32, @floatFromInt(sprite.h)) / size }, .{ 1, 1, 1 }, alpha, -1);
     }
     pub fn text(self: *Canvas, x: f32, y: f32, value: []const u8, size: f32, color: Color) !void {
         if (size <= 0) return;

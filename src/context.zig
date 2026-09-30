@@ -1,5 +1,9 @@
 //! Immediate-mode front end: call widgets every frame, they return what the user did.
 //! Hit-testing uses the previous frame's layout, so widgets can answer before this frame is laid out.
+//!
+//! Widgets are named by their label; text after `##` is hidden but keeps names unique. For any
+//! component without a wrapper here, build it with `builder()` and `widgets`, give it an `idFor`
+//! id, add it with `element`, and ask `clicked`.
 const std = @import("std");
 const types = @import("types.zig");
 const Rect = types.Rect;
@@ -8,11 +12,27 @@ const Vertex = types.Vertex;
 const Font = @import("font.zig").Font;
 const Canvas = @import("canvas.zig").Canvas;
 const L = @import("layout.zig");
+const W = @import("widgets.zig");
 const input = @import("input.zig");
 const accessibility = @import("accessibility.zig");
 const accesskit = @import("accesskit.zig");
+const text_edit = @import("text_edit.zig");
+const Image = @import("image.zig").Image;
+const ColorEditor = @import("components/color_editor.zig").ColorEditor;
+const ButtonVariant = @import("components/button.zig").Variant;
+const BadgeVariant = @import("components/badge.zig").Variant;
 
 pub const Container = enum { column, row, card };
+
+/// Keyboard input queued for the focused widget, in arrival order.
+const Pending = union(enum) {
+    key: @FieldType(input.Event, "key_down"),
+    /// Byte range of `Context.typed`.
+    text: struct { start: usize, len: usize },
+};
+
+/// Where a widget sat last frame and which overlay layer it was on (higher wins hit tests).
+const Target = struct { rect: Rect, z: i16 };
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
@@ -22,12 +42,24 @@ pub const Context = struct {
     pixel_scale: [2]f32 = .{ 1, 1 },
     /// Set when rendering to an sRGB target so colors are linearized.
     srgb_target: bool = false,
+    /// Milliseconds since the app started; drives GIFs and spinners. Backends set it each frame.
+    time_ms: u64 = 0,
     arena: std.heap.ArenaAllocator,
     vertices: std.ArrayList(Vertex) = .empty,
     /// Element bounds from the last `render`, keyed by widget id.
-    last_bounds: std.AutoHashMapUnmanaged(u32, Rect) = .empty,
+    last_bounds: std.AutoHashMapUnmanaged(u32, Target) = .empty,
+    /// The last rendered tree, for routing wheel and scrollbar input; freed by `newFrame`.
+    last_root: ?*L.Element = null,
     pointer: Vec2 = .zero,
     clicked: bool = false,
+    /// The left button is held.
+    pointer_held: bool = false,
+    /// Widget that owns the pointer while the button is held (slider, color wheel).
+    active: u32 = 0,
+    /// Widget whose drag ended since the last frame.
+    released: u32 = 0,
+    /// Scroll area being dragged by its bar, or panned by touch.
+    scroll_drag: ?struct { state: *L.ScrollState, bar: bool, last: Vec2 } = null,
     viewport: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// Open containers; the first entry is the frame root.
     stack: std.ArrayList(Open) = .empty,
@@ -46,6 +78,15 @@ pub const Context = struct {
     tab_moves: i32 = 0,
     /// Enter/Space pressed since the last frame.
     activate: bool = false,
+    /// Escape pressed since the last frame; closes popups and dialogs.
+    escape: bool = false,
+    /// Keys and text for the focused text field.
+    pending: std.ArrayList(Pending) = .empty,
+    typed: std.ArrayList(u8) = .empty,
+    /// A text field has focus: backends should enable text input (and the on-screen keyboard).
+    wants_text: bool = false,
+    /// The open select or menu, by trigger id; 0 when none.
+    open_popup: u32 = 0,
     /// Widget clicked by assistive technology this frame.
     a11y_clicked: u32 = 0,
     /// Outline every clickable region in red, to check hit targets.
@@ -54,8 +95,19 @@ pub const Context = struct {
     focus_visible: bool = false,
     /// Pointer shape for the element under the pointer, after `render`; backends apply it.
     cursor: input.Cursor = .default,
+    /// The element the last widget call added, for `tooltip`.
+    last_added: ?*L.Element = null,
 
-    const Open = struct { kind: Container, id: u32, children: std.ArrayList(*L.Element) = .empty };
+    const Kind = enum { column, row, card, grid, scroll, dialog };
+    const Open = struct {
+        kind: Kind,
+        id: u32,
+        children: std.ArrayList(*L.Element) = .empty,
+        columns: u16 = 0,
+        height: ?f32 = null,
+        scroll: ?*L.ScrollState = null,
+        title: []const u8 = "",
+    };
 
     pub fn init(gpa: std.mem.Allocator) !Context {
         return .{ .gpa = gpa, .font = try Font.init(gpa, @import("root.zig").default_font), .arena = .init(gpa) };
@@ -68,30 +120,67 @@ pub const Context = struct {
         self.vertices.deinit(self.gpa);
         self.last_bounds.deinit(self.gpa);
         self.last_focusables.deinit(self.gpa);
+        self.pending.deinit(self.gpa);
+        self.typed.deinit(self.gpa);
     }
 
-    /// Feed pointer input in the same coordinates as the viewport.
+    /// Feed input in the same coordinates as the viewport.
     pub fn handle(self: *Context, event: input.Event) void {
         switch (event) {
-            .pointer_move => |p| self.pointer = p,
+            .pointer_move => |p| {
+                self.pointer = p;
+                if (self.scroll_drag) |*drag| {
+                    if (drag.bar) drag.state.pointerMove(p.x, p.y) else {
+                        drag.state.offset = drag.state.offset.sub(p.sub(drag.last));
+                        drag.state.clamp();
+                    }
+                    drag.last = p;
+                }
+            },
             .pointer_down => |down| {
                 self.pointer = down.position;
                 self.focus_visible = false;
-                if (down.button == .left) self.clicked = true;
+                if (down.button != .left) return;
+                self.clicked = true;
+                self.pointer_held = true;
+                // Grab a scrollbar, or pan a scroll area by dragging its background (touch screens).
+                if (self.last_root) |root| if (root.scrollAt(down.position.x, down.position.y)) |state| {
+                    const bar = state.pointerDown(down.position.x, down.position.y);
+                    if (bar or self.hoveredWidget() == 0) self.scroll_drag = .{ .state = state, .bar = bar, .last = down.position };
+                };
             },
-            .pointer_up => |up| self.pointer = up.position,
-            .key_down => |key| switch (key.key) {
-                // Repeats count too, so holding Tab keeps moving focus.
-                .tab => {
-                    self.tab_moves += if (key.modifiers.shift) -1 else 1;
-                    self.focus_visible = true;
-                },
-                .enter, .space => if (!key.repeat) {
-                    self.activate = true;
-                },
-                else => {},
+            .pointer_up => |up| {
+                self.pointer = up.position;
+                if (up.button != .left) return;
+                self.pointer_held = false;
+                self.released = self.active;
+                self.active = 0;
+                if (self.scroll_drag) |drag| if (drag.bar) drag.state.pointerUp();
+                self.scroll_drag = null;
             },
-            else => {},
+            .wheel => |wheel| if (self.last_root) |root| if (root.scrollAt(wheel.position.x, wheel.position.y)) |state| state.wheel(wheel.delta.x, wheel.delta.y),
+            .key_down => |key| {
+                switch (key.key) {
+                    // Repeats count too, so holding Tab keeps moving focus.
+                    .tab => {
+                        self.tab_moves += if (key.modifiers.shift) -1 else 1;
+                        self.focus_visible = true;
+                        return;
+                    },
+                    .enter, .space => if (!key.repeat) {
+                        self.activate = true;
+                    },
+                    .escape => self.escape = true,
+                    else => {},
+                }
+                self.pending.append(self.gpa, .{ .key = key }) catch {};
+            },
+            .text => |value| {
+                const start = self.typed.items.len;
+                self.typed.appendSlice(self.gpa, value) catch return;
+                self.pending.append(self.gpa, .{ .text = .{ .start = start, .len = value.len } }) catch {};
+            },
+            .composition => {},
         }
     }
 
@@ -101,6 +190,7 @@ pub const Context = struct {
     }
 
     pub fn newFrame(self: *Context, viewport: Rect) void {
+        self.last_root = null;
         _ = self.arena.reset(.retain_capacity);
         if (self.accesskit) |adapter| while (adapter.nextAction()) |action| switch (action) {
             .click => |target| self.a11y_clicked = target,
@@ -112,44 +202,376 @@ pub const Context = struct {
         self.viewport = viewport;
         self.stack = .empty;
         self.err = null;
-        self.push(.column, 0);
+        self.wants_text = false;
+        self.last_added = null;
+        self.push(.{ .kind = .column, .id = 0 });
     }
 
+    // Containers ------------------------------------------------------------
+
     pub fn begin(self: *Context, kind: Container) void {
-        self.push(kind, self.id(@tagName(kind)));
+        self.push(.{ .kind = switch (kind) {
+            .column => .column,
+            .row => .row,
+            .card => .card,
+        }, .id = self.id(@tagName(kind)) });
+    }
+
+    /// A grid of `columns` equal columns, filled row by row. Close with `end`.
+    pub fn beginGrid(self: *Context, columns: u16) void {
+        self.push(.{ .kind = .grid, .id = self.id("grid"), .columns = @max(1, columns) });
+    }
+
+    /// A scrolling column `height` tall, or filling the rest of its parent when null. `state`
+    /// keeps the scroll position between frames. Close with `end`.
+    pub fn beginScroll(self: *Context, state: *L.ScrollState, height: ?f32) void {
+        self.push(.{ .kind = .scroll, .id = self.id("scroll"), .height = height, .scroll = state });
+    }
+
+    /// A modal dialog over the whole window while `open.*`. Escape closes it. Returns whether
+    /// it is open; only then add its contents and call `endDialog`.
+    pub fn beginDialog(self: *Context, title: []const u8, open: *bool) bool {
+        if (open.* and self.escape) {
+            open.* = false;
+            self.escape = false;
+        }
+        if (!open.*) return false;
+        self.push(.{ .kind = .dialog, .id = self.id(title), .title = visible(title) });
+        return true;
+    }
+
+    pub fn endDialog(self: *Context) void {
+        std.debug.assert(self.stack.items[self.stack.items.len - 1].kind == .dialog); // `endDialog` without `beginDialog`
+        self.end();
     }
 
     pub fn end(self: *Context) void {
         std.debug.assert(self.stack.items.len > 1); // unmatched `end`
         const open = self.stack.pop().?;
-        const style: L.Style = switch (open.kind) {
-            .column => .{ .gap = 12 },
-            .row => .{ .direction = .row, .gap = 12 },
-            .card => .{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = 24 }, .gap = 12 },
-        };
-        self.add(open.id, style, if (open.kind == .card) .card else .none, open.children.items);
+        if (self.err != null) return;
+        const b = self.builder();
+        switch (open.kind) {
+            .column => self.add(open.id, .{ .gap = 12 }, .none, open.children.items),
+            .row => self.add(open.id, .{ .direction = .row, .gap = 12, .align_items = .center, .wrap = true }, .none, open.children.items),
+            .card => self.add(open.id, .{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = 24 }, .gap = 12 }, .card, open.children.items),
+            .grid => self.add(open.id, .{ .columns = open.columns, .gap = 12 }, .none, open.children.items),
+            .scroll => {
+                const area = b.node(open.id, .{ .height = open.height, .grow = if (open.height == null) 1 else 0, .overflow = .scroll, .gap = 12, .padding = .{ .right = 12 } }, .none, open.children.items) catch |e| return self.fail(e);
+                area.scroll = open.scroll;
+                open.scroll.?.overlay_bar = true;
+                self.append(area);
+            },
+            .dialog => {
+                const children = self.arena.allocator().alloc(*L.Element, open.children.items.len + 1) catch |e| return self.fail(e);
+                children[0] = W.heading(b, 3, open.title) catch |e| return self.fail(e);
+                @memcpy(children[1..], open.children.items);
+                const modal = W.modal(b, self.viewport, .dialog, children) catch |e| return self.fail(e);
+                // The backdrop takes an id so it swallows clicks meant for the page underneath.
+                modal.id = open.id;
+                modal.overlay = .viewport;
+                modal.style.z_index = 300;
+                self.appendTo(0, modal);
+            },
+        }
     }
+
+    // Text and display ------------------------------------------------------
 
     pub fn label(self: *Context, comptime fmt: []const u8, args: anytype) void {
         const value = std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch |e| return self.fail(e);
         self.add(0, .{}, .{ .text = .{ .value = value } }, &.{});
     }
 
-    /// Returns true on the frame the button is clicked. Text after `##` is hidden but keeps ids unique.
-    pub fn button(self: *Context, text: []const u8) bool {
-        const widget = self.focusable(text);
-        const clicked = self.pressed(widget);
-        self.add(widget, .{ .width = 120, .height = 40 }, .{ .button = .{ .label = visible(text), .hot = self.hovered(widget) } }, &.{});
-        return clicked;
+    /// `level` 1 (page title) to 4 (small section title).
+    pub fn heading(self: *Context, level: u3, value: []const u8) void {
+        self.append(W.heading(self.builder(), level, value) catch |e| return self.fail(e));
+    }
+
+    /// Wrapped body text.
+    pub fn text(self: *Context, value: []const u8) void {
+        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true } }, &.{});
+    }
+
+    /// Wrapped secondary text.
+    pub fn muted(self: *Context, value: []const u8) void {
+        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true, .tone = .muted, .size = 14 } }, &.{});
+    }
+
+    pub fn separator(self: *Context) void {
+        self.add(0, .{ .height = 1 }, .separator, &.{});
+    }
+
+    pub fn badge(self: *Context, text_value: []const u8, variant: BadgeVariant) void {
+        self.add(0, .{ .height = 22 }, .{ .badge = .{ .label = text_value, .variant = variant } }, &.{});
+    }
+
+    pub fn avatar(self: *Context, initials: []const u8) void {
+        self.add(0, .{ .width = 40, .height = 40 }, .{ .avatar = initials }, &.{});
+    }
+
+    pub fn alert(self: *Context, title: []const u8, description: []const u8, destructive: bool) void {
+        self.add(0, .{ .height = 80 }, .{ .alert = .{ .title = title, .description = description, .destructive = destructive } }, &.{});
+    }
+
+    /// `value` from 0 to 1.
+    pub fn progress(self: *Context, value: f32) void {
+        self.add(0, .{ .height = 16 }, .{ .progress = std.math.clamp(value, 0, 1) }, &.{});
+    }
+
+    pub fn spinner(self: *Context) void {
+        self.add(0, .{ .width = 24, .height = 24 }, .{ .spinner = @as(f32, @floatFromInt(self.time_ms % 1000)) / 1000 }, &.{});
+    }
+
+    pub fn skeleton(self: *Context, width: f32, height: f32) void {
+        self.add(0, .{ .width = width, .height = height }, .{ .animated_skeleton = @as(f32, @floatFromInt(self.time_ms % 1500)) / 1500 }, &.{});
+    }
+
+    pub fn table(self: *Context, headers: []const []const u8, rows: []const []const []const u8) void {
+        self.append(W.tableWithOptions(self.builder(), headers, rows, .{ .lines = true }) catch |e| return self.fail(e));
+    }
+
+    /// Draw `image` (its current frame, for GIFs) `width` wide, or at its decoded size when
+    /// null, keeping its aspect ratio.
+    pub fn image(self: *Context, value: *const Image, width: ?f32) void {
+        const w = width orelse @as(f32, @floatFromInt(value.width));
+        const h = w * @as(f32, @floatFromInt(value.height)) / @as(f32, @floatFromInt(@max(1, value.width)));
+        self.add(0, .{ .width = w, .height = h }, .{ .image = value.frameAt(self.time_ms) }, &.{});
+        if (self.last_added) |added| added.accessibility.role = .image;
+    }
+
+    /// Show `text` beside the previous widget while the pointer rests on it.
+    pub fn tooltip(self: *Context, value: []const u8) void {
+        const anchor = self.last_added orelse return;
+        if (anchor.id == 0 or anchor.id != self.hoveredWidget()) return;
+        self.appendTo(0, W.tooltipAt(self.builder(), anchor, value) catch |e| return self.fail(e));
+    }
+
+    // Controls ----------------------------------------------------------------
+
+    /// Returns true on the frame the button is clicked.
+    pub fn button(self: *Context, value: []const u8) bool {
+        return self.buttonVariant(value, .default);
+    }
+
+    pub fn buttonVariant(self: *Context, value: []const u8, variant: ButtonVariant) bool {
+        const widget = self.focusable(value);
+        const clicked_now = self.pressed(widget);
+        const shown = visible(value);
+        self.add(widget, .{ .width = @max(96, self.font.measure(shown, 14) + 32), .height = 40 }, .{ .button = .{ .label = shown, .variant = variant, .hot = self.hoveredWidget() == widget } }, &.{});
+        return clicked_now;
     }
 
     /// Toggles `value` when clicked; returns true if it changed.
-    pub fn checkbox(self: *Context, text: []const u8, value: *bool) bool {
-        const widget = self.focusable(text);
+    pub fn checkbox(self: *Context, value_label: []const u8, value: *bool) bool {
+        const widget = self.focusable(value_label);
         const changed = self.pressed(widget);
         if (changed) value.* = !value.*;
-        self.add(widget, .{ .height = 32 }, .{ .checkbox = .{ .label = visible(text), .checked = value.* } }, &.{});
+        self.add(widget, .{ .height = 32 }, .{ .checkbox = .{ .label = visible(value_label), .checked = value.* } }, &.{});
         return changed;
+    }
+
+    /// A switch; returns true if `value` changed.
+    pub fn toggle(self: *Context, value_label: []const u8, value: *bool) bool {
+        const widget = self.focusable(value_label);
+        const changed = self.pressed(widget);
+        if (changed) value.* = !value.*;
+        self.add(widget, .{ .height = 32 }, .{ .toggle = .{ .label = visible(value_label), .enabled = value.* } }, &.{});
+        return changed;
+    }
+
+    /// One choice of a radio group: selects `index` into `selected`. Returns true if it changed.
+    pub fn radio(self: *Context, value_label: []const u8, selected: *usize, index: usize) bool {
+        const widget = self.focusable(value_label);
+        const changed = self.pressed(widget) and selected.* != index;
+        if (changed) selected.* = index;
+        const b = self.builder();
+        const circle = b.node(0, .{ .width = 20, .height = 20 }, .{ .radio = .{ .checked = selected.* == index } }, &.{}) catch |e| return self.failed(e);
+        const caption = b.node(0, .{}, .{ .text = .{ .value = visible(value_label) } }, &.{}) catch |e| return self.failed(e);
+        caption.accessibility.role = .ignored;
+        self.add(widget, .{ .direction = .row, .height = 32, .gap = 10, .align_items = .center }, .none, &.{ circle, caption });
+        if (self.last_added) |added| added.accessibility = .{ .role = .radio, .label = visible(value_label) };
+        return changed;
+    }
+
+    /// Drag, click, or use the arrow keys to set `value` between `min` and `max`. Returns true if it changed.
+    pub fn slider(self: *Context, value_label: []const u8, value: *f32, min: f32, max: f32) bool {
+        const widget = self.focusable(value_label);
+        if (self.clicked and self.hoveredWidget() == widget) self.active = widget;
+        const before = value.*;
+        if (self.active == widget) if (self.last_bounds.get(widget)) |target| {
+            const t = std.math.clamp((self.pointer.x - target.rect.x - 8) / @max(1, target.rect.w - 16), 0, 1);
+            value.* = min + t * (max - min);
+        };
+        if (self.focus == widget) for (self.pending.items) |item| switch (item) {
+            .key => |key| switch (key.key) {
+                .left, .down => value.* -= (max - min) / 20,
+                .right, .up => value.* += (max - min) / 20,
+                .home => value.* = min,
+                .end => value.* = max,
+                else => {},
+            },
+            .text => {},
+        };
+        value.* = std.math.clamp(value.*, min, max);
+        const t = if (max > min) (value.* - min) / (max - min) else 0;
+        self.add(widget, .{ .height = 28, .min_width = 160 }, .{ .slider = .{ .value = t } }, &.{});
+        if (self.last_added) |added| added.accessibility = .{ .label = visible(value_label), .numeric_value = t };
+        return value.* != before;
+    }
+
+    /// A tab bar; clicking a tab selects its index. Draw the selected tab's content after it.
+    pub fn tabs(self: *Context, labels: []const []const u8, selected: *usize) bool {
+        const b = self.builder();
+        const children = self.arena.allocator().alloc(*L.Element, labels.len) catch |e| return self.failed(e);
+        var changed = false;
+        for (labels, children, 0..) |tab_label, *child, i| {
+            const widget = self.focusable(tab_label);
+            if (self.pressed(widget) and selected.* != i) {
+                selected.* = i;
+                changed = true;
+            }
+            child.* = b.tab(widget, visible(tab_label), selected.* == i) catch |e| return self.failed(e);
+            child.*.style.height = 32;
+        }
+        const bar = b.node(0, .{ .direction = .row, .gap = 2, .padding = .{ .left = 3, .right = 3, .top = 3, .bottom = 3 } }, .{ .surface = .track }, children) catch |e| return self.failed(e);
+        bar.accessibility.role = .tab_list;
+        self.append(bar);
+        return changed;
+    }
+
+    /// A dropdown of `options`; picking one sets `selected`. Returns true if it changed.
+    pub fn select(self: *Context, value_label: []const u8, options: []const []const u8, selected: *usize) bool {
+        const widget = self.focusable(value_label);
+        const b = self.builder();
+        var changed = false;
+        var on_item = false;
+        if (self.open_popup == widget) {
+            for (options, 0..) |_, i| {
+                const item = itemId(widget, i);
+                if (self.hoveredWidget() == item) on_item = true;
+                if (self.pressed(item)) {
+                    changed = selected.* != i;
+                    selected.* = i;
+                    self.open_popup = 0;
+                }
+            }
+            if (self.escape) {
+                self.open_popup = 0;
+                self.escape = false;
+            }
+        }
+        if (self.pressed(widget)) {
+            self.open_popup = if (self.open_popup == widget) 0 else widget;
+        } else if (self.open_popup == widget and self.clicked and !on_item) self.open_popup = 0;
+        const current = if (selected.* < options.len) options[selected.*] else "";
+        const trigger = W.select(b, widget, current, visible(value_label)) catch |e| return self.failed(e);
+        trigger.style.min_width = 200;
+        self.append(trigger);
+        if (self.open_popup == widget) {
+            const choices = self.arena.allocator().alloc(W.Choice, options.len) catch |e| return self.failed(e);
+            for (choices, options, 0..) |*choice, option, i| choice.* = .{ .id = itemId(widget, i), .label = option };
+            const hot = self.hoveredWidget();
+            if (W.dropdownMenu(b, trigger, choices, hot, true) catch |e| return self.failed(e)) |menu| self.appendTo(0, menu);
+            for (choices) |choice| self.focusables.append(self.arena.allocator(), choice.id) catch |e| return self.failed(e);
+        }
+        return changed;
+    }
+
+    /// A single-line text field editing `edit` (a `TextEdit(n)`). Returns true if the text changed.
+    pub fn textInput(self: *Context, value_label: []const u8, edit: anytype, placeholder: []const u8) bool {
+        const widget = self.focusable(value_label);
+        const size = self.theme.text_size;
+        const before_len = edit.len;
+        const before_hash = std.hash.Wyhash.hash(0, edit.text());
+        if (self.focus == widget) {
+            self.wants_text = true;
+            if (self.clicked and self.hoveredWidget() == widget) if (self.last_bounds.get(widget)) |target| {
+                edit.placeCaret(&self.font, size, text_edit.inputContentRect(target.rect), false, self.pointer.x, self.pointer.y, false);
+            };
+            for (self.pending.items) |item| switch (item) {
+                .text => |range| _ = edit.insertFitting(self.typed.items[range.start..][0..range.len]) catch false,
+                .key => |key| {
+                    const word = key.modifiers.control or key.modifiers.alt;
+                    const shift = key.modifiers.shift;
+                    switch (key.key) {
+                        .backspace => edit.backspace(),
+                        .delete => edit.delete(),
+                        .left => edit.moveLeft(shift, word),
+                        .right => edit.moveRight(shift, word),
+                        .home => edit.moveHome(shift),
+                        .end => edit.moveEnd(shift),
+                        .a => if (key.modifiers.control or key.modifiers.super) edit.selectAll(),
+                        .z => if (key.modifiers.control or key.modifiers.super) {
+                            _ = if (shift) edit.redo() else edit.undo();
+                        },
+                        .y => if (key.modifiers.control) {
+                            _ = edit.redo();
+                        },
+                        else => {},
+                    }
+                },
+            };
+        }
+        const focused = self.focus == widget;
+        self.add(widget, .{ .height = 40, .min_width = 200 }, .{ .input = .{
+            .value = edit.text(),
+            .placeholder = placeholder,
+            .focused = focused,
+            .caret_visible = (self.time_ms / 530) % 2 == 0,
+            .cursor = if (focused) edit.cursor else null,
+            .selection = if (focused) edit.selection() else null,
+        } }, &.{});
+        if (self.last_added) |added| added.accessibility.label = visible(value_label);
+        return edit.len != before_len or std.hash.Wyhash.hash(0, edit.text()) != before_hash;
+    }
+
+    /// Hue wheel plus value and alpha sliders editing `editor`. Returns true while it changes.
+    pub fn colorPicker(self: *Context, value_label: []const u8, editor: *ColorEditor) bool {
+        const base = self.focusable(value_label);
+        const b = self.builder();
+        const before = editor.*;
+        const parts = [_]struct { id: u32, channel: @import("components/color_editor.zig").Channel }{
+            .{ .id = itemId(base, 0), .channel = .wheel },
+            .{ .id = itemId(base, 1), .channel = .value },
+            .{ .id = itemId(base, 2), .channel = .alpha },
+        };
+        for (parts) |part| {
+            if (self.clicked and self.hoveredWidget() == part.id) if (self.last_bounds.get(part.id)) |target| {
+                self.active = part.id;
+                editor.press(part.channel, target.rect, self.pointer.x, self.pointer.y);
+            };
+            if (self.active == part.id) editor.dragTo(self.pointer.x, self.pointer.y);
+            if (self.released == part.id) editor.release();
+        }
+        const wheel = b.node(parts[0].id, .{ .width = 160, .height = 160 }, .{ .color_wheel = editor.* }, &.{}) catch |e| return self.failed(e);
+        const value = b.node(parts[1].id, .{ .height = 28, .min_width = 160 }, .{ .color_channel = .{ .editor = editor.*, .channel = .value, .label = "Value" } }, &.{}) catch |e| return self.failed(e);
+        const alpha = b.node(parts[2].id, .{ .height = 28, .min_width = 160 }, .{ .color_channel = .{ .editor = editor.*, .channel = .alpha, .label = "Alpha" } }, &.{}) catch |e| return self.failed(e);
+        const swatch = b.node(0, .{ .height = 40 }, .{ .swatch = .{ .color = editor.rgb(), .alpha = editor.alpha } }, &.{}) catch |e| return self.failed(e);
+        const sliders = b.node(0, .{ .gap = 12, .grow = 1 }, .none, &.{ value, alpha, swatch }) catch |e| return self.failed(e);
+        self.add(0, .{ .direction = .row, .gap = 16 }, .none, &.{ wheel, sliders });
+        return !std.meta.eql(before, editor.*);
+    }
+
+    // Escape hatch ------------------------------------------------------------
+
+    /// Frame-lifetime allocator for building `widgets`/`Layout` elements by hand.
+    pub fn builder(self: *Context) L.Builder {
+        return .{ .allocator = self.arena.allocator() };
+    }
+
+    /// Id for a hand-built interactive element named `value`, registered in Tab order.
+    pub fn idFor(self: *Context, value: []const u8) u32 {
+        return self.focusable(value);
+    }
+
+    /// Add a hand-built element to the open container.
+    pub fn element(self: *Context, value: *L.Element) void {
+        self.append(value);
+    }
+
+    /// Whether the element with `widget` id (from `idFor`) was clicked or activated this frame.
+    pub fn activated(self: *const Context, widget: u32) bool {
+        return self.pressed(widget);
     }
 
     /// Lays out and paints the frame. The vertices stay valid until the next `render`.
@@ -158,14 +580,19 @@ pub const Context = struct {
             self.clicked = false;
             self.a11y_clicked = 0;
             self.activate = false;
+            self.escape = false;
+            self.released = 0;
+            self.pending.clearRetainingCapacity();
+            self.typed.clearRetainingCapacity();
         }
         if (self.err) |e| return e;
         std.debug.assert(self.stack.items.len == 1); // missing `end`
-        const b = L.Builder{ .allocator = self.arena.allocator() };
+        const b = self.builder();
         const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 16 }, .gap = 12 }, .none, self.stack.items[0].children.items);
         root.layout(self.viewport, &self.font);
+        self.last_root = root;
         self.last_bounds.clearRetainingCapacity();
-        try self.remember(root);
+        try self.remember(root, 0);
         self.last_focusables.clearRetainingCapacity();
         try self.last_focusables.appendSlice(self.gpa, self.focusables.items);
         if (std.mem.indexOfScalar(u32, self.focusables.items, self.focus) == null) self.focus = 0;
@@ -202,55 +629,63 @@ pub const Context = struct {
         }
     }
 
-    fn push(self: *Context, kind: Container, widget: u32) void {
-        self.stack.append(self.arena.allocator(), .{ .kind = kind, .id = widget }) catch |e| self.fail(e);
+    fn push(self: *Context, open: Open) void {
+        self.stack.append(self.arena.allocator(), open) catch |e| self.fail(e);
     }
 
     fn add(self: *Context, widget: u32, style: L.Style, paint: L.Paint, children: []const *L.Element) void {
         if (self.err != null) return;
-        const b = L.Builder{ .allocator = self.arena.allocator() };
-        const element = b.node(widget, style, paint, children) catch |e| return self.fail(e);
-        const parent = &self.stack.items[self.stack.items.len - 1];
-        parent.children.append(self.arena.allocator(), element) catch |e| self.fail(e);
+        self.append(self.builder().node(widget, style, paint, children) catch |e| return self.fail(e));
     }
 
-    fn remember(self: *Context, element: *const L.Element) !void {
-        if (element.id != 0) try self.last_bounds.put(self.gpa, element.id, element.bounds.intersection(element.clip));
-        for (element.children) |child| try self.remember(child);
+    fn append(self: *Context, value: *L.Element) void {
+        self.appendTo(self.stack.items.len - 1, value);
+    }
+
+    fn appendTo(self: *Context, depth: usize, value: *L.Element) void {
+        if (self.err != null) return;
+        self.stack.items[depth].children.append(self.arena.allocator(), value) catch |e| return self.fail(e);
+        self.last_added = value;
+    }
+
+    fn remember(self: *Context, value: *const L.Element, layer: i16) !void {
+        const z = if (value.overlay != null) value.style.z_index else layer;
+        if (value.id != 0) try self.last_bounds.put(self.gpa, value.id, .{ .rect = value.bounds.intersection(value.clip), .z = z });
+        for (value.children) |child| try self.remember(child, z);
     }
 
     // ponytail: ids hash the label with the open-container path; identical labels in one container collide, use `##suffix`.
-    fn id(self: *const Context, text: []const u8) u32 {
+    fn id(self: *const Context, value: []const u8) u32 {
         var seed: u64 = 0;
         for (self.stack.items) |open| seed = seed *% 31 +% open.id +% open.children.items.len;
-        return @as(u32, @truncate(std.hash.Wyhash.hash(seed, text))) | 1;
+        return @as(u32, @truncate(std.hash.Wyhash.hash(seed, value))) | 1;
     }
 
-    /// Smallest last-frame widget under the pointer, so nested hit targets win.
+    /// Topmost last-frame widget under the pointer: the highest overlay layer, then the smallest
+    /// area, so popups beat the page and nested hit targets win.
     fn hoveredWidget(self: *const Context) u32 {
         var best: u32 = 0;
+        var best_z: i16 = std.math.minInt(i16);
         var area = std.math.inf(f32);
         var it = self.last_bounds.iterator();
         while (it.next()) |entry| {
-            const r = entry.value_ptr.*;
-            if (r.contains(self.pointer.x, self.pointer.y) and r.w * r.h < area) {
+            const target = entry.value_ptr.*;
+            const r = target.rect;
+            if (!r.contains(self.pointer.x, self.pointer.y)) continue;
+            if (target.z > best_z or (target.z == best_z and r.w * r.h < area)) {
                 best = entry.key_ptr.*;
+                best_z = target.z;
                 area = r.w * r.h;
             }
         }
         return best;
     }
 
-    fn hovered(self: *const Context, widget: u32) bool {
-        const r = self.last_bounds.get(widget) orelse return false;
-        return r.contains(self.pointer.x, self.pointer.y);
-    }
-
     /// Id for an interactive widget, registered in Tab order. A mouse press on it takes focus.
-    fn focusable(self: *Context, text: []const u8) u32 {
-        const widget = self.id(text);
+    fn focusable(self: *Context, value: []const u8) u32 {
+        const widget = self.id(value);
         self.focusables.append(self.arena.allocator(), widget) catch |e| self.fail(e);
-        if (self.clicked and self.hovered(widget)) self.focus = widget;
+        if (self.clicked and self.hoveredWidget() == widget) self.focus = widget;
         return widget;
     }
 
@@ -264,13 +699,23 @@ pub const Context = struct {
     }
 
     fn pressed(self: *const Context, widget: u32) bool {
-        return (self.clicked and self.hovered(widget)) or self.a11y_clicked == widget or (self.activate and self.focus == widget);
+        return (self.clicked and self.hoveredWidget() == widget) or self.a11y_clicked == widget or (self.activate and self.focus == widget);
     }
 
     fn fail(self: *Context, e: anyerror) void {
         if (self.err == null) self.err = e;
     }
+
+    fn failed(self: *Context, e: anyerror) bool {
+        self.fail(e);
+        return false;
+    }
 };
+
+/// Stable id for the `index`th part of `widget` (select options, color picker parts).
+fn itemId(widget: u32, index: usize) u32 {
+    return @as(u32, @truncate(std.hash.Wyhash.hash(widget, std.mem.asBytes(&index)))) | 1;
+}
 
 fn visible(text: []const u8) []const u8 {
     return text[0 .. std.mem.indexOf(u8, text, "##") orelse text.len];
@@ -366,10 +811,82 @@ test "counter button clicks against last frame's layout" {
         _ = ctx.checkbox("Show hints", &hints);
         ctx.end();
         try std.testing.expect((try ctx.render()).len > 0);
-        // Click the button (the only 120-wide widget) at its centre from the frame just rendered.
-        var it = ctx.last_bounds.iterator();
-        while (it.next()) |entry| if (entry.value_ptr.w == 120) ctx.handle(.{ .pointer_down = .{ .position = entry.value_ptr.center(), .button = .left, .clicks = 1 } });
+        // Click the button (the first focusable widget) at its centre from the frame just rendered.
+        const target = ctx.last_bounds.get(ctx.last_focusables.items[0]).?;
+        ctx.handle(.{ .pointer_down = .{ .position = target.rect.center(), .button = .left, .clicks = 1 } });
+        ctx.handle(.{ .pointer_up = .{ .position = target.rect.center(), .button = .left } });
     }
     try std.testing.expectEqual(@as(u32, 2), count);
     try std.testing.expect(!hints);
+}
+
+test "slider drags, select picks, text input types, radio selects, dialog closes on escape" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 600, .h = 800 };
+    const State = struct {
+        volume: f32 = 0,
+        size: usize = 0,
+        choice: usize = 0,
+        name: text_edit.TextEdit(32) = .{},
+        dialog: bool = true,
+        fn frame(c: *Context, v: Rect, s: *@This()) !void {
+            c.newFrame(v);
+            _ = c.slider("Volume", &s.volume, 0, 10);
+            _ = c.select("Size", &.{ "Small", "Medium", "Large" }, &s.size);
+            _ = c.textInput("Name", &s.name, "Your name");
+            _ = c.radio("One", &s.choice, 0);
+            _ = c.radio("Two", &s.choice, 1);
+            if (c.beginDialog("Hello", &s.dialog)) c.endDialog();
+            _ = try c.render();
+        }
+    };
+    var s: State = .{};
+    try State.frame(&ctx, viewport, &s);
+    // The open dialog covers the page; Escape closes it.
+    ctx.handle(.{ .key_down = .{ .key = .escape, .modifiers = .{}, .repeat = false } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expect(!s.dialog);
+    try State.frame(&ctx, viewport, &s);
+    const ids = ctx.last_focusables.items; // volume, size, name, one, two
+    const at = struct {
+        fn center(c: *const Context, widget: u32) Vec2 {
+            return c.last_bounds.get(widget).?.rect.center();
+        }
+    };
+
+    // Press the slider at its right end and drag to the middle.
+    const track = ctx.last_bounds.get(ids[0]).?.rect;
+    ctx.handle(.{ .pointer_down = .{ .position = Vec2.init(track.x + track.w - 1, track.center().y), .button = .left, .clicks = 1 } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqual(@as(f32, 10), s.volume);
+    ctx.handle(.{ .pointer_move = track.center() });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectApproxEqAbs(@as(f32, 5), s.volume, 0.01);
+    ctx.handle(.{ .pointer_up = .{ .position = track.center(), .button = .left } });
+
+    // Open the select, then pick its third option from the popup.
+    ctx.handle(.{ .pointer_down = .{ .position = at.center(&ctx, ids[1]), .button = .left, .clicks = 1 } });
+    try State.frame(&ctx, viewport, &s);
+    try State.frame(&ctx, viewport, &s);
+    const large = ctx.last_bounds.get(itemId(ids[1], 2)).?.rect.center();
+    ctx.handle(.{ .pointer_move = large });
+    ctx.handle(.{ .pointer_down = .{ .position = large, .button = .left, .clicks = 1 } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqual(@as(usize, 2), s.size);
+    try std.testing.expectEqual(@as(u32, 0), ctx.open_popup);
+
+    // Focus the field by clicking it, then type and backspace.
+    ctx.handle(.{ .pointer_down = .{ .position = at.center(&ctx, ids[2]), .button = .left, .clicks = 1 } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expect(ctx.wants_text);
+    ctx.handle(.{ .text = "Eggs" });
+    ctx.handle(.{ .key_down = .{ .key = .backspace, .modifiers = .{}, .repeat = false } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqualStrings("Egg", s.name.text());
+
+    // Clicking the second radio's label selects it.
+    ctx.handle(.{ .pointer_down = .{ .position = at.center(&ctx, ids[4]), .button = .left, .clicks = 1 } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqual(@as(usize, 1), s.choice);
 }

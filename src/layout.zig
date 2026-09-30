@@ -73,6 +73,8 @@ pub const Paint = union(enum) {
     color_channel: struct { editor: ColorEditor, channel: @import("components/color_editor.zig").Channel, label: []const u8 = "" },
     swatch: struct { color: types.Color, alpha: f32 = 1 },
     backdrop,
+    /// A color-atlas sprite, such as the current frame of an `Image`.
+    image: @import("font.zig").Glyph,
     custom: struct {
         context: *const anyopaque,
         measure: ?*const fn (*const anyopaque, f32, *const Font) f32 = null,
@@ -343,6 +345,7 @@ pub const Element = struct {
             .color_channel => |slider| try @import("components/color_editor.zig").drawChannel(c, self.bounds, slider.editor, slider.channel, slider.label),
             .swatch => |swatch| try @import("components/color_editor.zig").drawSwatch(c, self.bounds, swatch.color, swatch.alpha),
             .backdrop => try c.rectAlpha(self.bounds, .{ 0, 0, 0 }, 0.45),
+            .image => |sprite| try c.image(self.bounds, sprite, 1),
             .custom => |custom| try custom.draw(custom.context, c, self.bounds),
         }
         for (0..self.children.len) |i| try self.paintChild(i).drawBase(c, skip_overlays);

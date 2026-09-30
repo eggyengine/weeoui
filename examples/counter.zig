@@ -5,9 +5,13 @@ const builtin = @import("builtin");
 const ui = @import("weeoui");
 const weeoui_sdl3 = @import("weeoui_sdl3");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    try start(init.gpa, init.io);
+}
+
+fn start(gpa: std.mem.Allocator, io: std.Io) !void {
     var count: u32 = 0;
-    try weeoui_sdl3.run(std.heap.smp_allocator, .{ .title = "weeoui counter", .width = 480, .height = 320 }, &count, frame);
+    try weeoui_sdl3.run(gpa, io, .{ .title = "weeoui counter", .width = 480, .height = 320 }, &count, frame);
 }
 
 /// Android drops stderr, so send logs to logcat there.
@@ -36,8 +40,14 @@ comptime {
     if (builtin.abi.isAndroid()) @export(&androidMain, .{ .name = "SDL_main" });
 }
 
+/// SDL calls this instead of `main`, so it builds the `std.process.Init` pieces `start` needs.
 fn androidMain(_: c_int, _: [*c][*c]u8) callconv(.c) c_int {
-    main() catch |err| {
+    var debug: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug.deinit();
+    const gpa = if (builtin.mode == .Debug) debug.allocator() else std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    start(gpa, threaded.io()) catch |err| {
         std.log.err("counter: {s}", .{@errorName(err)});
         return 1;
     };

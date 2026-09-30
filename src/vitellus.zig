@@ -199,7 +199,8 @@ pub const Painter = struct {
             .queue = queue,
             .extent = extent,
             .format = caps.formats[0],
-            .present_mode = caps.present_modes[0],
+            // Vsync: FIFO is always supported, and keeps an idle UI from spinning the GPU.
+            .present_mode = if (std.mem.indexOfScalar(vit.PresentMode, caps.present_modes, .fifo) != null) .fifo else caps.present_modes[0],
             .image_count = 2,
             .composite_alpha = caps.composite_alpha[0],
         });

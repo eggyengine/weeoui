@@ -17,8 +17,8 @@
             .lazy = true,
         },
         .vitellus = .{
-            .url = "git+https://github.com/eggyengine/vitellus#0edabd51dbb80aadf9abd2b3778de31864d36272",
-            .hash = "vitellus-0.1.0-JC2CjGFjCAAoSPKKL6WK3TxI0hV8BS24kpXyx0FDmmL2",
+            .url = "git+https://github.com/eggyengine/vitellus#f845757f02c52304436aafbad039ce57d9f555e1",
+            .hash = "vitellus-0.1.0-JC2CjFxpCADTJ2OM3RtM6vmYiJdhzYwa1Y65wYIwoxH2",
             .lazy = true,
         },
         .android = .{
@@ -29,6 +29,10 @@
         .accesskit_c = .{
             .url = "https://github.com/AccessKit/accesskit-c/releases/download/0.23.0/accesskit-c-0.23.0.zip",
             .hash = "N-V-__8AAEFGZhErLHq9UH3Pw21WPLBLfjYaqLIboPjbQHTB",
+        },
+        .stb = .{
+            .url = "git+https://github.com/nothings/stb#2c980bb59875b0d32144a71867fbdebb2f77cd20",
+            .hash = "N-V-__8AAPJDTgBMvhz_RoGlqYS1cMahRQ6Q5GVqYKny36gQ",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "examples" },
