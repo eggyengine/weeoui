@@ -17,8 +17,13 @@
             .lazy = true,
         },
         .vitellus = .{
-            .url = "git+https://github.com/eggyengine/vitellus#9ee2cee3bb55b2545b6b167a9890319559813749",
-            .hash = "vitellus-0.1.0-JC2CjGPDCQDlF2tnM4zZ5xo9GkgYDnfA9nkXsbtMv8b5",
+            .url = "git+https://github.com/eggyengine/vitellus#0edabd51dbb80aadf9abd2b3778de31864d36272",
+            .hash = "vitellus-0.1.0-JC2CjGFjCAAoSPKKL6WK3TxI0hV8BS24kpXyx0FDmmL2",
+            .lazy = true,
+        },
+        .android = .{
+            .url = "git+https://github.com/silbinarywolf/zig-android-sdk?ref=main#0e8dfe60ec5120e99d6705ab4606079bc3160a53",
+            .hash = "android-0.3.0-7iz7Qp9IAgBlbdmEnCTne54Rn_lfHtiN3Er6HFkhn5y8",
             .lazy = true,
         },
         .accesskit_c = .{

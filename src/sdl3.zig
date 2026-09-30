@@ -38,28 +38,39 @@ pub fn run(gpa: std.mem.Allocator, options: RunOptions, state: anytype, comptime
     defer ctx.deinit();
     ctx.name = options.title;
     ctx.theme = options.theme orelse systemTheme();
-    if (options.emoji) _ = ctx.font.loadSystemEmoji(std.Io.Threaded.global_single_threaded.io());
+    if (builtin.abi.isAndroid()) {
+        // Android's emoji font is COLRv1, which FreeType can't draw; use the platform's text stack.
+        if (options.emoji) if (sdl3.c.SDL_GetAndroidJNIEnv()) |env| {
+            ctx.font.platform = @import("android_text.zig").renderer(env);
+        };
+    } else if (options.emoji) _ = ctx.font.loadSystemEmoji(std.Io.Threaded.global_single_threaded.io());
     var painter = try Painter.init(gpa, try window.asWindow(), try pixelSize(window.window), &ctx.font);
     defer painter.deinit();
     ctx.srgb_target = painter.srgb();
+    var scale: f32 = 1; // UI units per window point
     while (true) {
         while (sdl3.events.poll()) |event| switch (event) {
             .quit, .window_close_requested => return,
             .system_theme_changed => if (options.theme == null) {
                 ctx.theme = systemTheme();
             },
-            else => handleEvent(&ctx, event),
+            else => handleScaledEvent(&ctx, event, scale),
         };
         const logical = try window.window.getSize();
         if (logical.@"0" == 0 or logical.@"1" == 0) {
             sdl3.timer.delayMilliseconds(16); // minimized
             continue;
         }
-        const viewport = ui.Rect{ .x = 0, .y = 0, .w = @floatFromInt(logical.@"0"), .h = @floatFromInt(logical.@"1") };
+        // Android windows report raw pixels with no density applied, so scale UI units up to
+        // the display's density there. ponytail: desktop keeps 1; Windows' DPI scale could use this too.
+        if (builtin.abi.isAndroid()) scale = (window.window.getDisplayScale() catch 1) / (window.window.getPixelDensity() catch 1);
+        const viewport = ui.Rect{ .x = 0, .y = 0, .w = @as(f32, @floatFromInt(logical.@"0")) / scale, .h = @as(f32, @floatFromInt(logical.@"1")) / scale };
         const pixels = try pixelSize(window.window);
         ctx.pixel_scale = .{ @as(f32, @floatFromInt(pixels.width)) / viewport.w, @as(f32, @floatFromInt(pixels.height)) / viewport.h };
         ctx.font.dpi_scale = ctx.pixel_scale[0];
-        ctx.newFrame(viewport);
+        // Lay out inside the safe area so status bars and camera cutouts don't cover the UI.
+        const safe = window.window.getSafeArea() catch null;
+        ctx.newFrame(if (safe) |r| .{ .x = @as(f32, @floatFromInt(r.x)) / scale, .y = @as(f32, @floatFromInt(r.y)) / scale, .w = @as(f32, @floatFromInt(r.w)) / scale, .h = @as(f32, @floatFromInt(r.h)) / scale } else viewport);
         try frame(state, &ctx);
         try painter.paint(pixels, &ctx.font, try ctx.render(), viewport, ctx.theme.background);
         setCursor(ctx.cursor);
@@ -192,8 +203,13 @@ pub fn systemTheme() ui.Theme {
 
 /// Forward an SDL event to a `ui.Context`. The first event from a window also attaches AccessKit to it.
 pub fn handleEvent(ctx: *ui.Context, event: sdl3.events.Event) void {
+    handleScaledEvent(ctx, event, 1);
+}
+
+/// `handleEvent` for a UI drawn `scale` times larger than window points.
+fn handleScaledEvent(ctx: *ui.Context, event: sdl3.events.Event, scale: f32) void {
     if (windowOf(event)) |window| {
-        if (ctx.accesskit == null) {
+        if (ctx.accesskit == null and ui.accesskit.supported) {
             if (accessKitWindow(window)) |native| {
                 ctx.attachAccessibility(native) catch |err| std.log.warn("screen reader support unavailable: {s}", .{@errorName(err)});
             } else |err| std.log.warn("screen reader support unavailable: {s}", .{@errorName(err)});
@@ -206,7 +222,7 @@ pub fn handleEvent(ctx: *ui.Context, event: sdl3.events.Event) void {
             else => {},
         };
     }
-    if (translate(event)) |e| ctx.handle(e);
+    if (translate(event)) |e| ctx.handle(scaled(e, scale));
 }
 
 /// The native handle AccessKit needs for `window`, for apps that manage their own `accesskit.Adapter`.
@@ -247,6 +263,19 @@ fn windowOf(event: sdl3.events.Event) ?sdl3.video.Window {
         },
     };
     return sdl3.video.Window.fromId(id orelse return null) catch null;
+}
+
+/// `event` with positions divided by `scale`, for UIs drawn larger than window points.
+fn scaled(event: ui.input.Event, scale: f32) ui.input.Event {
+    var e = event;
+    switch (e) {
+        .pointer_move => |*p| p.* = p.scale(1 / scale),
+        .pointer_down => |*d| d.position = d.position.scale(1 / scale),
+        .pointer_up => |*u| u.position = u.position.scale(1 / scale),
+        .wheel => |*w| w.position = w.position.scale(1 / scale),
+        else => {},
+    }
+    return e;
 }
 
 /// SDL event to Weeoui input, or null when it isn't input. For apps that route input themselves.

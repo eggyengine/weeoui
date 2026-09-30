@@ -110,6 +110,17 @@ fn copyGray(pixels: []u8, stride: usize, at: [2]usize, bitmap: c.FT_Bitmap) void
     }
 }
 
+/// A glyph drawn by the platform's own text renderer: straight RGBA, `width * height * 4` bytes.
+pub const PlatformGlyph = struct { pixels: []u8, width: u16, height: u16, top: i16, advance: f32 };
+
+/// Draws glyphs the main font lacks with the OS text stack, ahead of the emoji font. Android uses
+/// this: it ships only COLRv1 emoji, which FreeType can't rasterize.
+pub const PlatformRenderer = struct {
+    context: ?*anyopaque,
+    /// Draw `codepoint` at `size` pixels into `allocator`-owned pixels, or null when it can't.
+    render: *const fn (context: ?*anyopaque, allocator: std.mem.Allocator, codepoint: u21, size: f32) ?PlatformGlyph,
+};
+
 pub const Font = struct {
     pub const Strike = struct {
         size: f32 = 0,
@@ -127,6 +138,7 @@ pub const Font = struct {
     icons: [icon_masks.len]Glyph = [_]Glyph{.{}} ** icon_masks.len,
     corner: Glyph = .{},
     dpi_scale: f32 = 1,
+    platform: ?PlatformRenderer = null,
     dynamic: *Dynamic,
 
     /// Rasterize printable ASCII from TTF/OTF `bytes`; other characters load on first use,
@@ -292,6 +304,13 @@ pub const Font = struct {
         };
     }
 
+    fn packPlatform(self: *const Font, drawn: PlatformGlyph) !Glyph {
+        const at = self.dynamic.color_shelf.place(drawn.width, drawn.height) orelse return error.AtlasFull;
+        const row = @as(usize, drawn.width) * 4;
+        for (0..drawn.height) |y| @memcpy(self.color_pixels[((at[1] + y) * color_atlas_size + at[0]) * 4 ..][0..row], drawn.pixels[y * row ..][0..row]);
+        return .{ .x = @intCast(at[0]), .y = @intCast(at[1]), .w = drawn.width, .h = drawn.height, .top = drawn.top, .advance = drawn.advance, .color = true };
+    }
+
     /// Rasterize `codepoint` at `selected`'s size from the main font, else the emoji font.
     fn rasterize(self: *const Font, selected: *const Strike, codepoint: u21) !Glyph {
         const d = self.dynamic;
@@ -301,6 +320,10 @@ pub const Font = struct {
             if (c.FT_Load_Char(d.face, codepoint, c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_LIGHT) != 0) return error.GlyphLoadFailed;
             return self.packGray(d.face.*.glyph);
         }
+        if (self.platform) |platform| if (platform.render(platform.context, self.allocator, codepoint, selected.size)) |drawn| {
+            defer self.allocator.free(drawn.pixels);
+            return self.packPlatform(drawn);
+        };
         const face = d.emoji_face orelse return error.MissingGlyph;
         const index = c.FT_Get_Char_Index(face, codepoint);
         if (index == 0) return error.MissingGlyph;

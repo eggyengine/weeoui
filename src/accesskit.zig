@@ -10,6 +10,13 @@ const c = @cImport({
 
 const text_run_id: u64 = @as(u64, 1) << 63;
 
+/// Whether this target has an AccessKit adapter. Android reports `.linux` but has no AT-SPI.
+pub const supported = !builtin.abi.isAndroid() and switch (builtin.os.tag) {
+    .linux, .windows, .macos => true,
+    else => false,
+};
+const os: std.Target.Os.Tag = if (supported) builtin.os.tag else .other;
+
 /// The native window AccessKit attaches to. Linux (AT-SPI) needs no handle.
 pub const Window = union(enum) {
     unix,
@@ -35,11 +42,11 @@ pub const Action = union(enum) {
     set_selection: struct { target: u32, anchor: usize, focus: usize },
 };
 
-const Native = switch (builtin.os.tag) {
+const Native = switch (os) {
     .linux => c.accesskit_unix_adapter,
     .windows => c.accesskit_windows_subclassing_adapter,
     .macos => c.accesskit_macos_subclassing_adapter,
-    else => @compileError("AccessKit has no desktop adapter for this target"),
+    else => anyopaque,
 };
 
 pub const Adapter = struct {
@@ -60,20 +67,20 @@ pub const Adapter = struct {
         const self = try allocator.create(Adapter);
         errdefer allocator.destroy(self);
         self.* = .{ .allocator = allocator, .name = name, .arena = .init(allocator) };
-        self.native = switch (builtin.os.tag) {
+        self.native = switch (os) {
             .linux => c.accesskit_unix_adapter_new(initialTree, self, handleAction, self, deactivated, self),
             .windows => c.accesskit_windows_subclassing_adapter_new(@ptrCast(@alignCast(window.win32)), initialTree, self, handleAction, self),
             .macos => blk: {
                 c.accesskit_macos_add_focus_forwarder_to_window_class(window.cocoa.class_name.ptr);
                 break :blk c.accesskit_macos_subclassing_adapter_for_window(window.cocoa.window, initialTree, self, handleAction, self);
             },
-            else => unreachable,
+            else => return error.AccessKitUnsupported,
         } orelse return error.AccessKitInitFailed;
         return self;
     }
 
     pub fn destroy(self: *Adapter) void {
-        switch (builtin.os.tag) {
+        switch (os) {
             .linux => c.accesskit_unix_adapter_free(self.native.?),
             .windows => c.accesskit_windows_subclassing_adapter_free(self.native.?),
             .macos => c.accesskit_macos_subclassing_adapter_free(self.native.?),
@@ -93,7 +100,7 @@ pub const Adapter = struct {
         self.mutex.unlock();
         old.deinit();
         const native = self.native orelse return; // headless (tests)
-        switch (builtin.os.tag) {
+        switch (os) {
             .linux => c.accesskit_unix_adapter_update_if_active(native, updatedTree, self),
             .windows => if (c.accesskit_windows_subclassing_adapter_update_if_active(native, updatedTree, self)) |events| c.accesskit_windows_queued_events_raise(events),
             .macos => if (c.accesskit_macos_subclassing_adapter_update_if_active(native, updatedTree, self)) |events| c.accesskit_macos_queued_events_raise(events),
@@ -102,7 +109,7 @@ pub const Adapter = struct {
     }
 
     pub fn setFocused(self: *Adapter, focused: bool) void {
-        switch (builtin.os.tag) {
+        switch (os) {
             .linux => c.accesskit_unix_adapter_update_window_focus_state(self.native.?, focused),
             .macos => if (c.accesskit_macos_subclassing_adapter_update_view_focus_state(self.native.?, focused)) |events| c.accesskit_macos_queued_events_raise(events),
             else => {},
@@ -112,7 +119,7 @@ pub const Adapter = struct {
     /// Screen-space window bounds including (`outer`) and excluding (`inner`) decorations.
     /// Only X11 needs this; other platforms query the window themselves.
     pub fn setWindowBounds(self: *Adapter, outer: Rect, inner: Rect) void {
-        if (builtin.os.tag != .linux) return;
+        if (os != .linux) return;
         c.accesskit_unix_adapter_set_root_window_bounds(self.native.?, toNative(outer, 1), toNative(inner, 1));
     }
 

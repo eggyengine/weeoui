@@ -14,6 +14,14 @@ pub fn build(b: *std.Build) void {
     mod.addImport("eggenvector", eggenvector.module("eggenvector"));
     mod.addImport("freetype", freetype.module("freetype"));
     mod.linkLibrary(freetype.artifact("freetype"));
+    // Aro's `@cImport` rejects bionic's `_Nonnull` array parameters; zig-android-sdk does the same for translate-c.
+    if (target.result.abi.isAndroid()) {
+        for ([_]*std.Build.Module{ mod, freetype.module("freetype") }) |m| {
+            m.addCMacro("_Nonnull", "");
+            m.addCMacro("_Nullable", "");
+        }
+        makePic(freetype.artifact("freetype"));
+    }
     linkAccessKit(b, mod, target.result);
     const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod, .use_llvm = true }));
     const test_step = b.step("test", "Check Weeoui module");
@@ -30,6 +38,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{ .{ .name = "weeoui", .module = mod }, .{ .name = "sdl3", .module = sdl3.module("sdl3") } },
+                .link_libc = true, // `@cImport("jni.h")` on Android
             });
             test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = adapter.?, .use_llvm = true })).step);
         }
@@ -64,30 +73,90 @@ pub fn build(b: *std.Build) void {
         adapter.?.addImport("vitellus_sdl3", sdl_window);
         adapter.?.addImport("weeoui_vitellus", renderer.?);
         // `zig build counter -Dsdl3 -Dvitellus`: the README quick start as a runnable window.
-        const counter = b.addExecutable(.{
-            .name = "counter",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/counter.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .imports = &.{
-                    .{ .name = "weeoui", .module = mod },
-                    .{ .name = "weeoui_sdl3", .module = adapter.? },
-                },
-            }),
-            .use_llvm = true,
+        const counter_module = b.createModule(.{
+            .root_source_file = b.path("examples/counter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "weeoui", .module = mod },
+                .{ .name = "weeoui_sdl3", .module = adapter.? },
+            },
         });
-        b.step("counter", "Run the counter example").dependOn(&b.addRunArtifact(counter).step);
+        const counter_step = b.step("counter", "Run the counter example (on Android: build, install and launch the APK)");
+        if (target.result.abi.isAndroid()) {
+            addAndroidCounter(b, counter_step, counter_module, vitellus_dep.?, sdl3_dep.?.module("sdl3"));
+        } else {
+            const counter = b.addExecutable(.{ .name = "counter", .root_module = counter_module, .use_llvm = true });
+            counter_step.dependOn(&b.addRunArtifact(counter).step);
+        }
     }
 }
 
-/// Screen-reader support is always on: link AccessKit's prebuilt C library into Weeoui.
+/// Android links everything into one shared `libmain.so`, so static libraries need PIC.
+fn makePic(compile: *std.Build.Step.Compile) void {
+    compile.root_module.pic = true;
+    for (compile.root_module.link_objects.items) |object| if (object == .other_step) makePic(object.other_step);
+}
+
+/// `zig build counter -Dsdl3 -Dvitellus -Dtarget=aarch64-linux-android.35`: package the counter as
+/// an APK (`zig-out/bin/counter.apk`), then install and start it with adb. Needs `ANDROID_HOME`.
+fn addAndroidCounter(b: *std.Build, step: *std.Build.Step, root_module: *std.Build.Module, vitellus: *std.Build.Dependency, sdl3: *std.Build.Module) void {
+    const android = b.lazyImport(@This(), "android") orelse return;
+    const vitellus_build = b.lazyImport(@This(), "vitellus") orelse return;
+    const sdk = android.Sdk.create(b, .{});
+    const apk = sdk.createApk(.{
+        .name = "counter",
+        .api_level = .android15,
+        .build_tools_version = "36.0.0",
+        .ndk_version = "27.1.12297006",
+    });
+    apk.setKeyStore(sdk.createKeyStore(.example));
+    apk.setAndroidManifest(b.path("examples/android/AndroidManifest.xml"));
+    apk.addJavaSourceFiles(.{
+        .root = b.path("examples/android/java"),
+        .files = &.{
+            "org/libsdl/app/SDL.java",
+            "org/libsdl/app/SDLActivity.java",
+            "org/libsdl/app/SDLAudioManager.java",
+            "org/libsdl/app/SDLControllerManager.java",
+            "org/libsdl/app/SDLDummyEdit.java",
+            "org/libsdl/app/SDLInputConnection.java",
+            "org/libsdl/app/SDLSurface.java",
+            "org/libsdl/app/HIDDevice.java",
+            "org/libsdl/app/HIDDeviceManager.java",
+            "org/libsdl/app/HIDDeviceUSB.java",
+            "org/libsdl/app/HIDDeviceBLESteamController.java",
+        },
+    });
+    // zig-sdl3's SDL has no Android backend; Vitellus rebuilds it with its Android patch.
+    // SDLActivity loads `libmain.so` and calls its exported `SDL_main`.
+    const lib = b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = root_module, .use_llvm = true });
+    const sdl = vitellus_build.androidSdl(b, vitellus, sdl3, lib);
+    apk.addLibraryFile(switch (root_module.resolved_target.?.result.cpu.arch) {
+        .aarch64 => .arm64_v8a,
+        .arm => .armeabi_v7a,
+        .x86_64 => .x86_64,
+        .x86 => .x86,
+        else => @panic("unsupported Android architecture"),
+    }, sdl.library);
+    apk.addArtifact(lib);
+    const installed = apk.addInstallApk();
+    sdl.setLibC(lib.libc_file.?);
+    b.getInstallStep().dependOn(&installed.step);
+    const install = sdk.addAdbInstall(installed.source);
+    const start = sdk.addAdbStart("com.eggyengine.weeoui.counter/org.libsdl.app.SDLActivity");
+    start.step.dependOn(&install.step);
+    step.dependOn(&start.step);
+}
+
+/// Screen-reader support is on for desktop targets: link AccessKit's prebuilt C library into Weeoui.
 /// On Windows it is a DLL; apps install `accesskit_dll` (a named lazy path) next to their executable.
 fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, target: std.Target) void {
     const accesskit = b.dependency("accesskit_c", .{});
     mod.addIncludePath(accesskit.path("include"));
     mod.link_libc = true;
+    if (target.abi.isAndroid()) return; // no Android build; `accesskit.supported` is false there
     const msvc = target.abi == .msvc;
     const library = switch (target.os.tag) {
         .linux => switch (target.cpu.arch) {
