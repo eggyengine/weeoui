@@ -97,6 +97,8 @@ pub const Context = struct {
     cursor: input.Cursor = .default,
     /// The element the last widget call added, for `tooltip`.
     last_added: ?*L.Element = null,
+    /// The window's own scroll position: the page scrolls whenever its content is taller than the window.
+    scroll: L.ScrollState = .{},
 
     const Kind = enum { column, row, card, grid, scroll, dialog };
     const Open = struct {
@@ -104,7 +106,7 @@ pub const Context = struct {
         id: u32,
         children: std.ArrayList(*L.Element) = .empty,
         columns: u16 = 0,
-        height: ?f32 = null,
+        height: f32 = 0,
         scroll: ?*L.ScrollState = null,
         title: []const u8 = "",
     };
@@ -222,9 +224,9 @@ pub const Context = struct {
         self.push(.{ .kind = .grid, .id = self.id("grid"), .columns = @max(1, columns) });
     }
 
-    /// A scrolling column `height` tall, or filling the rest of its parent when null. `state`
-    /// keeps the scroll position between frames. Close with `end`.
-    pub fn beginScroll(self: *Context, state: *L.ScrollState, height: ?f32) void {
+    /// A scrolling column `height` tall inside the page (the page itself scrolls on its own).
+    /// `state` keeps the scroll position between frames. Close with `end`.
+    pub fn beginScroll(self: *Context, state: *L.ScrollState, height: f32) void {
         self.push(.{ .kind = .scroll, .id = self.id("scroll"), .height = height, .scroll = state });
     }
 
@@ -256,7 +258,7 @@ pub const Context = struct {
             .card => self.add(open.id, .{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = 24 }, .gap = 12 }, .card, open.children.items),
             .grid => self.add(open.id, .{ .columns = open.columns, .gap = 12 }, .none, open.children.items),
             .scroll => {
-                const area = b.node(open.id, .{ .height = open.height, .grow = if (open.height == null) 1 else 0, .overflow = .scroll, .gap = 12, .padding = .{ .right = 12 } }, .none, open.children.items) catch |e| return self.fail(e);
+                const area = b.node(open.id, .{ .height = open.height, .overflow = .scroll, .gap = 12, .padding = .{ .right = 12 } }, .none, open.children.items) catch |e| return self.fail(e);
                 area.scroll = open.scroll;
                 open.scroll.?.overlay_bar = true;
                 self.append(area);
@@ -588,7 +590,9 @@ pub const Context = struct {
         if (self.err) |e| return e;
         std.debug.assert(self.stack.items.len == 1); // missing `end`
         const b = self.builder();
-        const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 16 }, .gap = 12 }, .none, self.stack.items[0].children.items);
+        const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 16 }, .gap = 12, .overflow = .scroll }, .none, self.stack.items[0].children.items);
+        root.scroll = &self.scroll;
+        self.scroll.overlay_bar = true;
         root.layout(self.viewport, &self.font);
         self.last_root = root;
         self.last_bounds.clearRetainingCapacity();
@@ -889,4 +893,21 @@ test "slider drags, select picks, text input types, radio selects, dialog closes
     ctx.handle(.{ .pointer_down = .{ .position = at.center(&ctx, ids[4]), .button = .left, .clicks = 1 } });
     try State.frame(&ctx, viewport, &s);
     try std.testing.expectEqual(@as(usize, 1), s.choice);
+}
+
+test "the page scrolls on its own when content is taller than the window" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 300, .h = 200 };
+    for (0..3) |_| {
+        ctx.newFrame(viewport);
+        for (0..40) |i| ctx.label("Row {d}", .{i});
+        _ = try ctx.render();
+        ctx.handle(.{ .wheel = .{ .position = Vec2.init(150, 100), .delta = Vec2.init(0, -1) } });
+    }
+    try std.testing.expect(ctx.scroll.offset.y > 0);
+    // Touch-style drag on the background pans it back.
+    ctx.handle(.{ .pointer_down = .{ .position = Vec2.init(290, 150), .button = .left, .clicks = 1 } });
+    ctx.handle(.{ .pointer_move = Vec2.init(290, 400) });
+    try std.testing.expectEqual(@as(f32, 0), ctx.scroll.offset.y);
 }

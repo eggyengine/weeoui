@@ -16,7 +16,6 @@ const Demo = struct {
     page: usize = 0,
     /// System, Light, Dark.
     appearance: usize = 0,
-    scroll: ui.Layout.ScrollState = .{},
     // Controls
     clicks: u32 = 0,
     notifications: bool = true,
@@ -62,9 +61,8 @@ fn frame(d: *Demo, ctx: *ui.Context) !void {
     ctx.badge("component gallery", .secondary);
     _ = ctx.select("Appearance", &.{ "System theme", "Light", "Dark" }, &d.appearance);
     ctx.end();
-    if (ctx.tabs(&pages, &d.page)) d.scroll = .{};
+    if (ctx.tabs(&pages, &d.page)) ctx.scroll.offset = .zero;
 
-    ctx.beginScroll(&d.scroll, null);
     ctx.beginGrid(if (ctx.viewport.w >= 760) 2 else 1);
     switch (d.page) {
         0 => controls(d, ctx),
@@ -74,7 +72,6 @@ fn frame(d: *Demo, ctx: *ui.Context) !void {
         4 => media(d, ctx),
         else => colour(d, ctx),
     }
-    ctx.end();
     ctx.end();
 }
 
@@ -280,4 +277,13 @@ test "every page lays out and paints at desktop and phone widths" {
         }
     };
     try std.testing.expectEqual(@as(usize, 12), demo.media.?[2].frames.len);
+    // The Controls page is taller than a phone screen, so the wheel scrolls it.
+    demo.page = 0;
+    for (0..2) |_| {
+        ctx.newFrame(.{ .x = 0, .y = 0, .w = 390, .h = 760 });
+        try frame(&demo, &ctx);
+        _ = try ctx.render();
+        ctx.handle(.{ .wheel = .{ .position = ui.Vec2.init(200, 400), .delta = ui.Vec2.init(0, -3) } });
+    }
+    try std.testing.expect(ctx.scroll.offset.y > 0);
 }
