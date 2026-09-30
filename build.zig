@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addDocs(b, mod, "weeoui");
     // libpng decodes the PNG strikes inside color emoji fonts (Noto Color Emoji, Apple Color Emoji).
     const freetype = b.dependency("freetype", .{ .target = target, .optimize = optimize, .@"enable-libpng" = true });
     const eggenvector = b.dependency("eggenvector", .{ .target = target, .optimize = optimize });
@@ -261,4 +262,12 @@ fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, target: std.Target) void
         },
         else => unreachable,
     }
+}
+
+/// `zig build docs`: Zig's HTML API docs for `mod` in zig-out/docs, which
+/// .github/workflows/docs.yml publishes to GitHub Pages.
+fn addDocs(b: *std.Build, mod: *std.Build.Module, name: []const u8) void {
+    const docs = b.addObject(.{ .name = name, .root_module = mod });
+    const install = b.addInstallDirectory(.{ .source_dir = docs.getEmittedDocs(), .install_dir = .prefix, .install_subdir = "docs" });
+    b.step("docs", "Build the API docs into zig-out/docs").dependOn(&install.step);
 }
