@@ -100,6 +100,52 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anyty
     }
 }
 
+/// `std_options` for apps: on Android, where stderr goes nowhere, logs go to logcat.
+///
+///     pub const std_options = weeoui_sdl3.std_options;
+pub const std_options: std.Options = if (builtin.abi.isAndroid()) .{ .logFn = logcat } else .{};
+
+fn logcat(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
+    const android_log = struct {
+        extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
+    };
+    var buffer: [1024]u8 = undefined;
+    const text = std.fmt.bufPrintZ(&buffer, format, args) catch blk: {
+        buffer[buffer.len - 1] = 0; // truncated
+        break :blk buffer[0 .. buffer.len - 1 :0];
+    };
+    const priority: c_int = switch (level) {
+        .err => 6,
+        .warn => 5,
+        .info => 4,
+        .debug => 3,
+    };
+    _ = android_log.__android_log_write(priority, if (scope == .default) "weeoui" else @tagName(scope), text);
+}
+
+/// On Android, SDLActivity loads the app as `libmain.so` and calls `SDL_main` instead of `main`.
+/// This exports it, calling `start` with the allocator and `Io` `std.process.Init` would give:
+///
+///     comptime { weeoui_sdl3.exportAndroidMain(start); }
+pub fn exportAndroidMain(comptime start: fn (std.mem.Allocator, std.Io) anyerror!void) void {
+    if (!builtin.abi.isAndroid()) return;
+    const entry = struct {
+        fn sdlMain(_: c_int, _: [*c][*c]u8) callconv(.c) c_int {
+            var debug: std.heap.DebugAllocator(.{}) = .init;
+            defer _ = debug.deinit();
+            const gpa = if (builtin.mode == .Debug) debug.allocator() else std.heap.smp_allocator;
+            var threaded: std.Io.Threaded = .init(gpa, .{});
+            defer threaded.deinit();
+            start(gpa, threaded.io()) catch |err| {
+                std.log.err("app exited: {s}", .{@errorName(err)});
+                return 1;
+            };
+            return 0;
+        }
+    };
+    @export(&entry.sdlMain, .{ .name = "SDL_main" });
+}
+
 fn pixelSize(window: sdl3.video.Window) !@import("vitellus").Extent2D {
     const size = try window.getSizeInPixels();
     return .{ .width = @intCast(size.@"0"), .height = @intCast(size.@"1") };

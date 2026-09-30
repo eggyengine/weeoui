@@ -1,14 +1,24 @@
 //! The weeoui component gallery, built on the immediate-mode `Context` API: each frame the UI is
 //! described from `Demo`'s state, and the widgets report what the user did.
-//! Run with `zig build demo -Dsdl3 -Dvitellus`.
+//! Run with `zig build demo -Dsdl3 -Dvitellus` (add `-Dtarget=aarch64-linux-android.35` for an APK).
 const std = @import("std");
 const ui = @import("weeoui");
 const weeoui_sdl3 = @import("weeoui_sdl3");
 
 pub fn main(init: std.process.Init) !void {
-    var demo: Demo = .{ .gpa = init.gpa };
+    try start(init.gpa, init.io);
+}
+
+fn start(gpa: std.mem.Allocator, io: std.Io) !void {
+    var demo: Demo = .{ .gpa = gpa };
     defer demo.deinit();
-    try weeoui_sdl3.run(init.gpa, init.io, .{ .title = "weeoui demo", .width = 1040, .height = 760 }, &demo, frame);
+    try weeoui_sdl3.run(gpa, io, .{ .title = "weeoui demo", .width = 1040, .height = 760 }, &demo, frame);
+}
+
+pub const std_options = weeoui_sdl3.std_options;
+
+comptime {
+    weeoui_sdl3.exportAndroidMain(start);
 }
 
 const Demo = struct {

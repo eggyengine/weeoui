@@ -86,17 +86,17 @@ pub fn build(b: *std.Build) void {
         adapter.?.addImport("vitellus", vitellus_module);
         adapter.?.addImport("vitellus_sdl3", sdl_window);
         adapter.?.addImport("weeoui_vitellus", renderer.?);
-        // `zig build counter -Dsdl3 -Dvitellus`: the README quick start as a runnable window.
-        const counter_module = example(b, "counter", mod, adapter.?);
-        const counter_step = b.step("counter", "Run the counter example (on Android: build, install and launch the APK)");
+        // `zig build counter|demo -Dsdl3 -Dvitellus`: the README quick start and the component
+        // gallery. With an Android `-Dtarget` they build, install and launch APKs instead.
+        const apps = [_]App{
+            .{ .name = "counter", .module = example(b, "counter", mod, adapter.?), .step = b.step("counter", "Run the counter example") },
+            .{ .name = "demo", .module = example(b, "demo", mod, adapter.?), .step = b.step("demo", "Run the component gallery") },
+        };
         if (target.result.abi.isAndroid()) {
-            addAndroidCounter(b, counter_step, counter_module, vitellus_dep.?, sdl3_dep.?.module("sdl3"));
+            addAndroidApps(b, &apps, vitellus_dep.?, sdl3_dep.?.module("sdl3"));
         } else {
-            addDesktopExample(b, counter_step, "counter", counter_module);
-            // `zig build demo -Dsdl3 -Dvitellus`: the component gallery.
-            const demo = example(b, "demo", mod, adapter.?);
-            addDesktopExample(b, b.step("demo", "Run the component gallery"), "demo", demo);
-            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = demo, .use_llvm = true })).step);
+            for (apps) |app| addDesktopExample(b, app.step, app.name, app.module);
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = apps[1].module, .use_llvm = true })).step);
         }
     }
 }
@@ -137,56 +137,86 @@ fn makePic(compile: *std.Build.Step.Compile) void {
     for (compile.root_module.link_objects.items) |object| if (object == .other_step) makePic(object.other_step);
 }
 
-/// `zig build counter -Dsdl3 -Dvitellus -Dtarget=aarch64-linux-android.35`: package the counter as
-/// an APK (`zig-out/bin/counter.apk`), then install and start it with adb. Needs `ANDROID_HOME`.
-fn addAndroidCounter(b: *std.Build, step: *std.Build.Step, root_module: *std.Build.Module, vitellus: *std.Build.Dependency, sdl3: *std.Build.Module) void {
+const App = struct { name: []const u8, module: *std.Build.Module, step: *std.Build.Step };
+
+/// `zig build <app> -Dsdl3 -Dvitellus -Dtarget=aarch64-linux-android.35`: package each app as an
+/// APK (`zig-out/bin/<app>.apk`, package `com.eggyengine.weeoui.<app>`), then install and start
+/// it with adb. Needs `ANDROID_HOME`.
+fn addAndroidApps(b: *std.Build, apps: []const App, vitellus: *std.Build.Dependency, sdl3: *std.Build.Module) void {
     const android = b.lazyImport(@This(), "android") orelse return;
     const vitellus_build = b.lazyImport(@This(), "vitellus") orelse return;
     const sdk = android.Sdk.create(b, .{});
-    const apk = sdk.createApk(.{
-        .name = "counter",
-        .api_level = .android15,
-        .build_tools_version = "36.0.0",
-        .ndk_version = "27.1.12297006",
-    });
-    apk.setKeyStore(sdk.createKeyStore(.example));
-    apk.setAndroidManifest(b.path("examples/android/AndroidManifest.xml"));
-    apk.addJavaSourceFiles(.{
-        .root = b.path("examples/android/java"),
-        .files = &.{
-            "org/libsdl/app/SDL.java",
-            "org/libsdl/app/SDLActivity.java",
-            "org/libsdl/app/SDLAudioManager.java",
-            "org/libsdl/app/SDLControllerManager.java",
-            "org/libsdl/app/SDLDummyEdit.java",
-            "org/libsdl/app/SDLInputConnection.java",
-            "org/libsdl/app/SDLSurface.java",
-            "org/libsdl/app/HIDDevice.java",
-            "org/libsdl/app/HIDDeviceManager.java",
-            "org/libsdl/app/HIDDeviceUSB.java",
-            "org/libsdl/app/HIDDeviceBLESteamController.java",
-        },
-    });
-    // zig-sdl3's SDL has no Android backend; Vitellus rebuilds it with its Android patch.
-    // SDLActivity loads `libmain.so` and calls its exported `SDL_main`.
-    const lib = b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = root_module, .use_llvm = true });
-    const sdl = vitellus_build.androidSdl(b, vitellus, sdl3, lib);
-    apk.addLibraryFile(switch (root_module.resolved_target.?.result.cpu.arch) {
-        .aarch64 => .arm64_v8a,
-        .arm => .armeabi_v7a,
-        .x86_64 => .x86_64,
-        .x86 => .x86,
-        else => @panic("unsupported Android architecture"),
-    }, sdl.library);
-    apk.addArtifact(lib);
-    const installed = apk.addInstallApk();
-    sdl.setLibC(lib.libc_file.?);
-    b.getInstallStep().dependOn(&installed.step);
-    const install = sdk.addAdbInstall(installed.source);
-    const start = sdk.addAdbStart("com.eggyengine.weeoui.counter/org.libsdl.app.SDLActivity");
-    start.step.dependOn(&install.step);
-    step.dependOn(&start.step);
+    // SDLActivity loads `libmain.so` and calls its exported `SDL_main` (see `weeoui_sdl3.exportAndroidMain`).
+    const libs = b.allocator.alloc(*std.Build.Step.Compile, apps.len) catch @panic("OOM");
+    for (apps, libs) |app, *lib| lib.* = b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = app.module, .use_llvm = true });
+    // zig-sdl3's SDL has no Android backend; Vitellus rebuilds it once, with its Android patch, for every app.
+    const sdl = vitellus_build.androidSdl(b, vitellus, sdl3, libs);
+    for (apps, libs, 0..) |app, lib, i| {
+        const apk = sdk.createApk(.{
+            .name = app.name,
+            .api_level = .android15,
+            .build_tools_version = "36.0.0",
+            .ndk_version = "27.1.12297006",
+        });
+        apk.setKeyStore(sdk.createKeyStore(.example));
+        apk.setAndroidManifest(b.addWriteFiles().add("AndroidManifest.xml", b.fmt(android_manifest, .{ app.name, app.name })));
+        apk.addJavaSourceFiles(.{
+            .root = b.path("examples/android/java"),
+            .files = &.{
+                "org/libsdl/app/SDL.java",
+                "org/libsdl/app/SDLActivity.java",
+                "org/libsdl/app/SDLAudioManager.java",
+                "org/libsdl/app/SDLControllerManager.java",
+                "org/libsdl/app/SDLDummyEdit.java",
+                "org/libsdl/app/SDLInputConnection.java",
+                "org/libsdl/app/SDLSurface.java",
+                "org/libsdl/app/HIDDevice.java",
+                "org/libsdl/app/HIDDeviceManager.java",
+                "org/libsdl/app/HIDDeviceUSB.java",
+                "org/libsdl/app/HIDDeviceBLESteamController.java",
+            },
+        });
+        apk.addLibraryFile(switch (app.module.resolved_target.?.result.cpu.arch) {
+            .aarch64 => .arm64_v8a,
+            .arm => .armeabi_v7a,
+            .x86_64 => .x86_64,
+            .x86 => .x86,
+            else => @panic("unsupported Android architecture"),
+        }, sdl.library);
+        apk.addArtifact(lib);
+        const installed = apk.addInstallApk();
+        if (i == 0) sdl.setLibC(lib.libc_file.?);
+        b.getInstallStep().dependOn(&installed.step);
+        const install = sdk.addAdbInstall(installed.source);
+        const start = sdk.addAdbStart(b.fmt("com.eggyengine.weeoui.{s}/org.libsdl.app.SDLActivity", .{app.name}));
+        start.step.dependOn(&install.step);
+        app.step.dependOn(&start.step);
+    }
 }
+
+const android_manifest =
+    \\<?xml version="1.0" encoding="utf-8"?>
+    \\<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    \\    android:versionCode="1"
+    \\    android:versionName="0.0.1"
+    \\    package="com.eggyengine.weeoui.{s}">
+    \\    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35" />
+    \\    <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="true" />
+    \\    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
+    \\    <application android:label="weeoui {s}" android:theme="@android:style/Theme.NoTitleBar.Fullscreen" android:hardwareAccelerated="true">
+    \\        <activity
+    \\            android:name="org.libsdl.app.SDLActivity"
+    \\            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+    \\            android:exported="true">
+    \\            <intent-filter>
+    \\                <action android:name="android.intent.action.MAIN" />
+    \\                <category android:name="android.intent.category.LAUNCHER" />
+    \\            </intent-filter>
+    \\        </activity>
+    \\    </application>
+    \\</manifest>
+    \\
+;
 
 /// Screen-reader support is on for desktop targets: link AccessKit's prebuilt C library into Weeoui.
 /// On Windows it is a DLL; apps install `accesskit_dll` (a named lazy path) next to their executable.
