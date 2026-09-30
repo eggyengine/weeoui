@@ -297,3 +297,54 @@ test "every page lays out and paints at desktop and phone widths" {
     }
     try std.testing.expect(ctx.scroll.offset.y > 0);
 }
+
+test "nothing spills out of its container, from small phones to wide desktops" {
+    var ctx = try ui.Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    var demo: Demo = .{ .gpa = std.testing.allocator, .appearance = 1 };
+    defer demo.deinit();
+    const Check = struct {
+        font: *const ui.Font,
+        viewport: ui.Rect,
+        /// A laid-out element that breaks the rules, with what it broke.
+        fn fits(check: @This(), parent: *const ui.Layout.Element) !void {
+            for (parent.children) |child| {
+                const b = child.bounds;
+                if (child.overlay != null) {
+                    // Popups stay on screen.
+                    try expectWithin(b.x >= check.viewport.x - 0.5 and b.x + b.w <= check.viewport.x + check.viewport.w + 0.5, child, "popup leaves the window");
+                } else if (parent.scroll == null) {
+                    // Children stay inside a parent that doesn't scroll.
+                    try expectWithin(b.x >= parent.bounds.x - 0.5 and b.x + b.w <= parent.bounds.x + parent.bounds.w + 0.5, child, "wider than its parent");
+                }
+                switch (child.paint_kind) {
+                    .text => |t| if (!t.wrap) try expectWithin(check.font.measure(t.value, t.size) <= b.w - child.style.padding.left - child.style.padding.right + 1, child, "text wider than its box"),
+                    .button => |button| try expectWithin(check.font.measure(button.label, 14) <= b.w, child, "label wider than its button"),
+                    else => {},
+                }
+                try check.fits(child);
+            }
+        }
+        fn expectWithin(ok: bool, element: *const ui.Layout.Element, why: []const u8) !void {
+            if (ok) return;
+            std.debug.print("{s}: id {d} {s} at {d:.1},{d:.1} {d:.1}x{d:.1}\n", .{ why, element.id, @tagName(element.paint_kind), element.bounds.x, element.bounds.y, element.bounds.w, element.bounds.h });
+            return error.Overflow;
+        }
+    };
+    var width: f32 = 280;
+    while (width <= 1480) : (width += 37) for (0..pages.len) |page| {
+        demo.page = page;
+        demo.dialog = page == 2;
+        const viewport = ui.Rect{ .x = 0, .y = 0, .w = width, .h = 760 };
+        for (0..2) |_| {
+            ctx.newFrame(viewport);
+            try frame(&demo, &ctx);
+            _ = try ctx.render();
+        }
+        const check: Check = .{ .font = &ctx.font, .viewport = viewport };
+        check.fits(ctx.last_root.?) catch |err| {
+            std.debug.print("page {s} at width {d}\n", .{ pages[page], width });
+            return err;
+        };
+    };
+}

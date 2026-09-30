@@ -26,6 +26,8 @@ pub const Style = struct {
     min_height: f32 = 0,
     max_width: ?f32 = null,
     max_height: ?f32 = null,
+    /// Width over height: the height follows the laid-out width (images). `height` wins if set.
+    aspect_ratio: ?f32 = null,
     grow: f32 = 0,
     gap: f32 = 0,
     padding: Insets = .{},
@@ -507,8 +509,11 @@ test "simple builder retains advanced styling and interaction" {
     try std.testing.expectEqual((types.Theme{}).foreground, canvas.theme.foreground);
 }
 
+/// Never wider than `available`: a fixed or minimum width gives way to a narrower container
+/// rather than spilling out of it (rows that scroll ask with their full content width).
 fn widthFor(style: Style, available: f32) f32 {
-    return @max(style.min_width, @min(style.max_width orelse std.math.inf(f32), style.width orelse available));
+    const wanted = @max(style.min_width, @min(style.max_width orelse std.math.inf(f32), style.width orelse available));
+    return @max(0, @min(available, wanted));
 }
 fn naturalWidth(node: *Element, font: *const Font) f32 {
     if (node.natural_width) |width| return width;
@@ -554,7 +559,8 @@ fn rowWidth(parent: *Element, child: *Element, inner_width: f32, font: *const Fo
         flow_count += 1;
     };
     basis += @as(f32, @floatFromInt(flow_count -| 1)) * parent.style.gap;
-    const extra = inner_width - basis;
+    // A scrolling row keeps natural widths and scrolls; any other row shrinks growing children to fit.
+    const extra = if (parent.style.overflow == .scroll) @max(0, inner_width - basis) else inner_width - basis;
     // Growing children share leftover space, and give it back (flex-shrink) when the row overflows.
     const proposed = naturalWidth(child, font) + (if (child.style.width == null and grows > 0) extra * child.style.grow / grows else 0);
     return widthFor(child.style, @max(0, proposed));
@@ -595,6 +601,7 @@ fn lined(node: *const Element) bool {
 }
 fn estimatedHeight(node: *Element, width: f32, font: *const Font) f32 {
     if (node.style.height) |height| return height;
+    if (node.style.aspect_ratio) |ratio| if (ratio > 0) return width / ratio;
     if (node.measured_height_width == width) return node.measured_height;
     const inner_width = @max(0, width - node.style.padding.left - node.style.padding.right);
     var height: f32 = 0;

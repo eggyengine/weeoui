@@ -51,15 +51,23 @@ pub const Context = struct {
     /// The last rendered tree, for routing wheel and scrollbar input; freed by `newFrame`.
     last_root: ?*L.Element = null,
     pointer: Vec2 = .zero,
+    /// A tap or click landed since the last frame: pressed and released on the same widget
+    /// without scrolling in between, like a touch screen expects.
     clicked: bool = false,
+    /// The left button went down since the last frame; drag widgets (sliders) grab the pointer on it.
+    pressed_down: bool = false,
     /// The left button is held.
     pointer_held: bool = false,
+    /// Where the current press started and on which widget, until it becomes a scroll.
+    press: ?struct { at: Vec2, widget: u32 } = null,
     /// Widget that owns the pointer while the button is held (slider, color wheel).
     active: u32 = 0,
     /// Widget whose drag ended since the last frame.
     released: u32 = 0,
-    /// Scroll area being dragged by its bar, or panned by touch.
+    /// Scroll area being dragged by its bar, or panned by a swipe.
     scroll_drag: ?struct { state: *L.ScrollState, bar: bool, last: Vec2 } = null,
+    /// Scroll positions of widgets that scroll themselves (tab bars), by widget id.
+    scroll_states: std.AutoHashMapUnmanaged(u32, *L.ScrollState) = .empty,
     viewport: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// Open containers; the first entry is the frame root.
     stack: std.ArrayList(Open) = .empty,
@@ -124,6 +132,9 @@ pub const Context = struct {
         self.last_focusables.deinit(self.gpa);
         self.pending.deinit(self.gpa);
         self.typed.deinit(self.gpa);
+        var states = self.scroll_states.valueIterator();
+        while (states.next()) |state| self.gpa.destroy(state.*);
+        self.scroll_states.deinit(self.gpa);
     }
 
     /// Feed input in the same coordinates as the viewport.
@@ -137,30 +148,51 @@ pub const Context = struct {
                         drag.state.clamp();
                     }
                     drag.last = p;
+                } else if (self.press) |press| {
+                    // A press that travels becomes a swipe: it scrolls whatever can scroll that way
+                    // under where it started, and is no longer a tap.
+                    const moved = p.sub(press.at);
+                    if (self.active == 0 and @abs(moved.x) + @abs(moved.y) > swipe_threshold) {
+                        const axis: L.ScrollState.Axis = if (@abs(moved.x) > @abs(moved.y)) .horizontal else .vertical;
+                        if (self.last_root) |root| if (scrollable(root, press.at.x, press.at.y, axis)) |state| {
+                            self.scroll_drag = .{ .state = state, .bar = false, .last = press.at };
+                            self.press = null;
+                            self.handle(event);
+                        };
+                    }
                 }
             },
             .pointer_down => |down| {
                 self.pointer = down.position;
                 self.focus_visible = false;
                 if (down.button != .left) return;
-                self.clicked = true;
+                self.pressed_down = true;
                 self.pointer_held = true;
-                // Grab a scrollbar, or pan a scroll area by dragging its background (touch screens).
+                self.press = .{ .at = down.position, .widget = self.hoveredWidget() };
                 if (self.last_root) |root| if (root.scrollAt(down.position.x, down.position.y)) |state| {
-                    const bar = state.pointerDown(down.position.x, down.position.y);
-                    if (bar or self.hoveredWidget() == 0) self.scroll_drag = .{ .state = state, .bar = bar, .last = down.position };
+                    if (state.pointerDown(down.position.x, down.position.y)) {
+                        self.scroll_drag = .{ .state = state, .bar = true, .last = down.position };
+                        self.press = null;
+                    }
                 };
             },
             .pointer_up => |up| {
                 self.pointer = up.position;
                 if (up.button != .left) return;
+                if (self.press) |press| {
+                    if (press.widget == self.hoveredWidget()) self.clicked = true;
+                }
+                self.press = null;
                 self.pointer_held = false;
                 self.released = self.active;
                 self.active = 0;
                 if (self.scroll_drag) |drag| if (drag.bar) drag.state.pointerUp();
                 self.scroll_drag = null;
             },
-            .wheel => |wheel| if (self.last_root) |root| if (root.scrollAt(wheel.position.x, wheel.position.y)) |state| state.wheel(wheel.delta.x, wheel.delta.y),
+            .wheel => |wheel| if (self.last_root) |root| {
+                const axis: L.ScrollState.Axis = if (wheel.delta.y != 0) .vertical else .horizontal;
+                if (scrollable(root, wheel.position.x, wheel.position.y, axis)) |state| state.wheel(wheel.delta.x, wheel.delta.y);
+            },
             .key_down => |key| {
                 switch (key.key) {
                     // Repeats count too, so holding Tab keeps moving focus.
@@ -255,7 +287,8 @@ pub const Context = struct {
         switch (open.kind) {
             .column => self.add(open.id, .{ .gap = 12 }, .none, open.children.items),
             .row => self.add(open.id, .{ .direction = .row, .gap = 12, .align_items = .center, .wrap = true }, .none, open.children.items),
-            .card => self.add(open.id, .{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = 24 }, .gap = 12 }, .card, open.children.items),
+            // Cards stop growing at a readable width instead of stretching across wide windows.
+            .card => self.add(open.id, .{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = 24 }, .gap = 12, .max_width = 640 }, .card, open.children.items),
             .grid => self.add(open.id, .{ .columns = open.columns, .gap = 12 }, .none, open.children.items),
             .scroll => {
                 const area = b.node(open.id, .{ .height = open.height, .overflow = .scroll, .gap = 12, .padding = .{ .right = 12 } }, .none, open.children.items) catch |e| return self.fail(e);
@@ -281,7 +314,7 @@ pub const Context = struct {
 
     pub fn label(self: *Context, comptime fmt: []const u8, args: anytype) void {
         const value = std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch |e| return self.fail(e);
-        self.add(0, .{}, .{ .text = .{ .value = value } }, &.{});
+        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true } }, &.{});
     }
 
     /// `level` 1 (page title) to 4 (small section title).
@@ -337,7 +370,7 @@ pub const Context = struct {
     pub fn image(self: *Context, value: *const Image, width: ?f32) void {
         const w = width orelse @as(f32, @floatFromInt(value.width));
         const h = w * @as(f32, @floatFromInt(value.height)) / @as(f32, @floatFromInt(@max(1, value.width)));
-        self.add(0, .{ .width = w, .height = h }, .{ .image = value.frameAt(self.time_ms) }, &.{});
+        self.add(0, .{ .width = w, .aspect_ratio = w / @max(1, h) }, .{ .image = value.frameAt(self.time_ms) }, &.{});
         if (self.last_added) |added| added.accessibility.role = .image;
     }
 
@@ -398,7 +431,7 @@ pub const Context = struct {
     /// Drag, click, or use the arrow keys to set `value` between `min` and `max`. Returns true if it changed.
     pub fn slider(self: *Context, value_label: []const u8, value: *f32, min: f32, max: f32) bool {
         const widget = self.focusable(value_label);
-        if (self.clicked and self.hoveredWidget() == widget) self.active = widget;
+        if (self.pressed_down and self.hoveredWidget() == widget) self.active = widget;
         const before = value.*;
         if (self.active == widget) if (self.last_bounds.get(widget)) |target| {
             const t = std.math.clamp((self.pointer.x - target.rect.x - 8) / @max(1, target.rect.w - 16), 0, 1);
@@ -435,8 +468,10 @@ pub const Context = struct {
             child.* = b.tab(widget, visible(tab_label), selected.* == i) catch |e| return self.failed(e);
             child.*.style.height = 32;
         }
-        const bar = b.node(0, .{ .direction = .row, .gap = 2, .padding = .{ .left = 3, .right = 3, .top = 3, .bottom = 3 } }, .{ .surface = .track }, children) catch |e| return self.failed(e);
+        // Too many tabs for the width scroll sideways instead of squashing.
+        const bar = b.node(0, .{ .direction = .row, .gap = 2, .padding = .{ .left = 3, .right = 3, .top = 3, .bottom = 3 }, .overflow = .scroll }, .{ .surface = .track }, children) catch |e| return self.failed(e);
         bar.accessibility.role = .tab_list;
+        bar.scroll = self.scrollState(self.id("tabs")) catch |e| return self.failed(e);
         self.append(bar);
         return changed;
     }
@@ -538,7 +573,7 @@ pub const Context = struct {
             .{ .id = itemId(base, 2), .channel = .alpha },
         };
         for (parts) |part| {
-            if (self.clicked and self.hoveredWidget() == part.id) if (self.last_bounds.get(part.id)) |target| {
+            if (self.pressed_down and self.hoveredWidget() == part.id) if (self.last_bounds.get(part.id)) |target| {
                 self.active = part.id;
                 editor.press(part.channel, target.rect, self.pointer.x, self.pointer.y);
             };
@@ -584,6 +619,7 @@ pub const Context = struct {
             self.activate = false;
             self.escape = false;
             self.released = 0;
+            self.pressed_down = false;
             self.pending.clearRetainingCapacity();
             self.typed.clearRetainingCapacity();
         }
@@ -631,6 +667,17 @@ pub const Context = struct {
                 else => return e,
             }
         }
+    }
+
+    /// Scroll position kept for `widget` between frames.
+    fn scrollState(self: *Context, widget: u32) !*L.ScrollState {
+        const entry = try self.scroll_states.getOrPut(self.gpa, widget);
+        if (!entry.found_existing) {
+            errdefer _ = self.scroll_states.remove(widget);
+            entry.value_ptr.* = try self.gpa.create(L.ScrollState);
+            entry.value_ptr.*.* = .{};
+        }
+        return entry.value_ptr.*;
     }
 
     fn push(self: *Context, open: Open) void {
@@ -715,6 +762,28 @@ pub const Context = struct {
         return false;
     }
 };
+
+/// How far (in viewport units) a press may travel and still count as a tap.
+const swipe_threshold = 10;
+
+/// The innermost scroll area under (`x`, `y`) with room to move along `axis`, so a sideways swipe
+/// on a tab bar scrolls the tabs while an up/down swipe on it still scrolls the page.
+fn scrollable(element: *const L.Element, x: f32, y: f32, axis: L.ScrollState.Axis) ?*L.ScrollState {
+    const within = element.bounds.intersection(element.clip).contains(x, y);
+    if (!within and !element.has_overlays) return null;
+    var i = element.children.len;
+    while (i > 0) {
+        i -= 1;
+        if (scrollable(element.paintChild(i), x, y, axis)) |state| return state;
+    }
+    const state = element.scroll orelse return null;
+    if (!within) return null;
+    const room = switch (axis) {
+        .horizontal => state.content.x - state.viewport.w,
+        .vertical => state.content.y - state.viewport.h,
+    };
+    return if (room > 0.5) state else null;
+}
 
 /// Stable id for the `index`th part of `widget` (select options, color picker parts).
 fn itemId(widget: u32, index: usize) u32 {
@@ -870,18 +939,18 @@ test "slider drags, select picks, text input types, radio selects, dialog closes
     ctx.handle(.{ .pointer_up = .{ .position = track.center(), .button = .left } });
 
     // Open the select, then pick its third option from the popup.
-    ctx.handle(.{ .pointer_down = .{ .position = at.center(&ctx, ids[1]), .button = .left, .clicks = 1 } });
+    tap(&ctx, at.center(&ctx, ids[1]));
     try State.frame(&ctx, viewport, &s);
     try State.frame(&ctx, viewport, &s);
     const large = ctx.last_bounds.get(itemId(ids[1], 2)).?.rect.center();
     ctx.handle(.{ .pointer_move = large });
-    ctx.handle(.{ .pointer_down = .{ .position = large, .button = .left, .clicks = 1 } });
+    tap(&ctx, large);
     try State.frame(&ctx, viewport, &s);
     try std.testing.expectEqual(@as(usize, 2), s.size);
     try std.testing.expectEqual(@as(u32, 0), ctx.open_popup);
 
     // Focus the field by clicking it, then type and backspace.
-    ctx.handle(.{ .pointer_down = .{ .position = at.center(&ctx, ids[2]), .button = .left, .clicks = 1 } });
+    tap(&ctx, at.center(&ctx, ids[2]));
     try State.frame(&ctx, viewport, &s);
     try std.testing.expect(ctx.wants_text);
     ctx.handle(.{ .text = "Eggs" });
@@ -890,7 +959,7 @@ test "slider drags, select picks, text input types, radio selects, dialog closes
     try std.testing.expectEqualStrings("Egg", s.name.text());
 
     // Clicking the second radio's label selects it.
-    ctx.handle(.{ .pointer_down = .{ .position = at.center(&ctx, ids[4]), .button = .left, .clicks = 1 } });
+    tap(&ctx, at.center(&ctx, ids[4]));
     try State.frame(&ctx, viewport, &s);
     try std.testing.expectEqual(@as(usize, 1), s.choice);
 }
@@ -910,4 +979,40 @@ test "the page scrolls on its own when content is taller than the window" {
     ctx.handle(.{ .pointer_down = .{ .position = Vec2.init(290, 150), .button = .left, .clicks = 1 } });
     ctx.handle(.{ .pointer_move = Vec2.init(290, 400) });
     try std.testing.expectEqual(@as(f32, 0), ctx.scroll.offset.y);
+}
+
+fn tap(ctx: *Context, at: Vec2) void {
+    ctx.handle(.{ .pointer_move = at });
+    ctx.handle(.{ .pointer_down = .{ .position = at, .button = .left, .clicks = 1 } });
+    ctx.handle(.{ .pointer_up = .{ .position = at, .button = .left } });
+}
+
+test "a swipe that starts on a button scrolls the page instead of clicking" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 300, .h = 200 };
+    var clicks: u32 = 0;
+    const Page = struct {
+        fn frame(c: *Context, v: Rect, n: *u32) !void {
+            c.newFrame(v);
+            if (c.button("Tap me")) n.* += 1;
+            for (0..40) |i| c.label("Row {d}", .{i});
+            _ = try c.render();
+        }
+    };
+    try Page.frame(&ctx, viewport, &clicks);
+    const button = ctx.last_bounds.get(ctx.last_focusables.items[0]).?.rect.center();
+    ctx.handle(.{ .pointer_down = .{ .position = button, .button = .left, .clicks = 1 } });
+    ctx.handle(.{ .pointer_move = button.sub(Vec2.init(0, 60)) });
+    ctx.handle(.{ .pointer_up = .{ .position = button.sub(Vec2.init(0, 60)), .button = .left } });
+    try Page.frame(&ctx, viewport, &clicks);
+    try std.testing.expectEqual(@as(u32, 0), clicks);
+    try std.testing.expect(ctx.scroll.offset.y > 40);
+    // A tap on it (scrolled back into view) still clicks.
+    ctx.scroll.offset = .zero;
+    try Page.frame(&ctx, viewport, &clicks);
+    try Page.frame(&ctx, viewport, &clicks);
+    tap(&ctx, ctx.last_bounds.get(ctx.last_focusables.items[0]).?.rect.center());
+    try Page.frame(&ctx, viewport, &clicks);
+    try std.testing.expectEqual(@as(u32, 1), clicks);
 }

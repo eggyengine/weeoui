@@ -571,8 +571,9 @@ fn tableRow(b: L.Builder, values: []const []const u8, header: bool) !*L.Element 
     const cells = try b.allocator.alloc(*L.Element, values.len);
     defer b.allocator.free(cells);
     for (values, 0..) |value, i| {
-        cells[i] = try b.node(0, .{ .height = 36, .padding = .{ .left = 12, .right = 12 } }, .{
-            .text = .{ .value = value, .size = 14, .tone = if (header) .muted else .foreground },
+        // Wraps instead of spilling into the next column when the table is narrow.
+        cells[i] = try b.node(0, .{ .min_height = 36, .padding = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 } }, .{
+            .text = .{ .value = value, .size = 14, .tone = if (header) .muted else .foreground, .wrap = true },
         }, &.{});
         cells[i].accessibility.role = if (header) .column_header else .cell;
     }
