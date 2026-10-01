@@ -59,7 +59,7 @@ ctx.srgb_target = painter.srgb();
 try painter.paint(pixel_extent, &ctx.font, vertices, viewport, ctx.theme.background);
 ```
 
-`paint` resizes the swapchain when `pixel_extent` changes. It waits for the GPU on every frame, which is simple but limits throughput.
+`paint` resizes the swapchain when `pixel_extent` changes. It keeps `weeoui_vitellus.frames_in_flight` (2) frames in flight, so the CPU builds the next frame while the GPU draws the last one.
 
 ## Rendering into your own pass with `Renderer`
 

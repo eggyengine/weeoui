@@ -173,11 +173,18 @@ pub const Painter = struct {
     adapter: vit.Adapter,
     device: vit.Device,
     queue: vit.Queue,
-    commands: vit.CommandPool,
     swapchain: vit.Swapchain,
     format: vit.Format,
     extent: vit.Extent2D,
     renderer: Renderer,
+    /// The CPU records into one slot while the GPU may still be drawing the other.
+    slots: [frames_in_flight]FrameSlot,
+    slot: usize = 0,
+    /// Advances to a frame's number when the GPU finishes it.
+    gpu_done: vit.Fence,
+    submitted: u64 = 0,
+    /// Signalled when drawing into swapchain image i finishes; its present waits on it.
+    render_done: [max_swapchain_images]vit.Semaphore,
 
     /// `extent` is the window size in physical pixels; `font` seeds the glyph atlases.
     pub fn init(gpa: std.mem.Allocator, window: vit.Window, extent: vit.Extent2D, font: *const ui.Font) !Painter {
@@ -189,8 +196,20 @@ pub const Painter = struct {
         errdefer device.deinit();
         const queue = try vit.Queue.init(device, .{ .kind = .graphics });
         errdefer queue.deinit();
-        const commands = try vit.CommandPool.init(device, .{ .kind = .graphics });
-        errdefer commands.deinit();
+        var slots: [frames_in_flight]FrameSlot = undefined;
+        for (&slots, 0..) |*slot, i| {
+            errdefer for (slots[0..i]) |*made| made.deinit();
+            slot.* = try .init(device);
+        }
+        errdefer for (&slots) |*slot| slot.deinit();
+        const gpu_done = try vit.Fence.init(device, .{ .label = "weeoui frames done" });
+        errdefer gpu_done.deinit();
+        var render_done: [max_swapchain_images]vit.Semaphore = undefined;
+        for (&render_done, 0..) |*semaphore, i| {
+            errdefer for (render_done[0..i]) |made| made.deinit();
+            semaphore.* = try vit.Semaphore.init(device, .{ .label = "weeoui render done" });
+        }
+        errdefer for (render_done) |semaphore| semaphore.deinit();
         const caps = try adapter.surfaceCapabilities(gpa, window);
         defer caps.deinit();
         if (caps.formats.len == 0 or caps.present_modes.len == 0 or caps.composite_alpha.len == 0) return error.NoSurfaceCapabilities;
@@ -208,14 +227,16 @@ pub const Painter = struct {
         const format = colorFormat(caps.formats[0]);
         const renderer = try Renderer.init(device, format, font);
         log.info("painting {d}x{d} as {s}", .{ extent.width, extent.height, @tagName(format) });
-        return .{ .instance = instance, .adapter = adapter, .device = device, .queue = queue, .commands = commands, .swapchain = swapchain, .format = format, .extent = extent, .renderer = renderer };
+        return .{ .instance = instance, .adapter = adapter, .device = device, .queue = queue, .swapchain = swapchain, .format = format, .extent = extent, .renderer = renderer, .slots = slots, .gpu_done = gpu_done, .render_done = render_done };
     }
 
     pub fn deinit(self: *Painter) void {
         self.queue.waitIdle() catch {};
         self.renderer.deinit();
         self.swapchain.deinit();
-        self.commands.deinit();
+        for (&self.slots) |*slot| slot.deinit();
+        for (self.render_done) |semaphore| semaphore.deinit();
+        self.gpu_done.deinit();
         self.queue.deinit();
         self.device.deinit();
         self.adapter.deinit();
@@ -230,16 +251,23 @@ pub const Painter = struct {
     /// Clear to `background` and draw one frame of `vertices` laid out in `viewport` units.
     /// A new `extent` (physical pixels) resizes the swapchain first.
     pub fn paint(self: *Painter, extent: vit.Extent2D, font: *const ui.Font, vertices: []const ui.Vertex, viewport: ui.Rect, background: ui.Color) !void {
-        // ponytail: waits for the GPU every frame so the single vertex buffer is free; add frames in flight if it matters.
-        try self.queue.waitIdle();
+        const slot = &self.slots[self.slot];
+        // Wait for the frame that last used this slot, `frames_in_flight` frames ago; that also
+        // frees the `Renderer` vertex buffer `upload` is about to reuse.
+        _ = try self.gpu_done.wait(slot.frame, null);
+        if (slot.cmd) |old| old.deinit();
+        slot.cmd = null;
+        try slot.commands.reset();
         if (extent.width != self.extent.width or extent.height != self.extent.height) {
+            try self.queue.waitIdle();
             try self.swapchain.resize(extent);
             self.extent = extent;
         }
-        try self.commands.reset();
-        const acquired = try self.swapchain.acquireNextImage(null);
-        const cmd = try vit.CommandBuffer.init(self.commands, .{});
-        defer cmd.deinit();
+        const acquired = try self.swapchain.acquireNextImage(slot.acquired);
+        if (acquired.index >= max_swapchain_images) return error.TooManySwapchainImages;
+        const render_done = self.render_done[acquired.index];
+        const cmd = try vit.CommandBuffer.init(slot.commands, .{});
+        slot.cmd = cmd;
         try cmd.barrier(&.{.{ .texture_view = .{ .view = acquired.view, .before = .present, .after = .color_attachment } }});
         try self.renderer.upload(cmd, font, vertices, viewport);
         const linear = self.srgb();
@@ -258,8 +286,41 @@ pub const Painter = struct {
         cmd.endRenderPass();
         try cmd.barrier(&.{.{ .texture_view = .{ .view = acquired.view, .before = .color_attachment, .after = .present } }});
         try cmd.finish();
-        try self.queue.submit(.{ .command_buffers = &.{cmd} });
-        _ = try self.swapchain.present(&.{});
+        self.submitted += 1;
+        try self.queue.submit(.{
+            .command_buffers = &.{cmd},
+            .wait_semaphores = &.{slot.acquired},
+            .signal_semaphores = &.{render_done},
+            .signal_fences = &.{.{ .fence = self.gpu_done, .value = self.submitted }},
+        });
+        slot.frame = self.submitted;
+        self.slot = (self.slot + 1) % frames_in_flight;
+        _ = try self.swapchain.present(&.{render_done});
+    }
+};
+
+const max_swapchain_images = 8;
+
+/// What one frame in flight owns until the GPU finishes it.
+const FrameSlot = struct {
+    commands: vit.CommandPool,
+    /// Signalled by the swapchain when the acquired image is ready to draw into.
+    acquired: vit.Semaphore,
+    /// Freed once the GPU is done with it, not right after submitting.
+    cmd: ?vit.CommandBuffer = null,
+    /// Frame number (`gpu_done` value) that last used this slot.
+    frame: u64 = 0,
+
+    fn init(device: vit.Device) !FrameSlot {
+        const commands = try vit.CommandPool.init(device, .{ .kind = .graphics });
+        errdefer commands.deinit();
+        return .{ .commands = commands, .acquired = try vit.Semaphore.init(device, .{ .label = "weeoui image acquired" }) };
+    }
+
+    fn deinit(self: *FrameSlot) void {
+        if (self.cmd) |cmd| cmd.deinit();
+        self.acquired.deinit();
+        self.commands.deinit();
     }
 };
 
