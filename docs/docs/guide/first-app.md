@@ -36,7 +36,9 @@ Widgets read and write your values through pointers. `ctx.toggle("Laying", &hen.
 ```zig
 ctx.begin(.card);
 ctx.heading(4, "Add a hen");
+ctx.label("Name", .{});
 _ = ctx.textInput("Name", &coop.new_name, "Henrietta");
+ctx.label("Breed", .{});
 _ = ctx.select("Breed", &breeds, &coop.breed);
 if (ctx.button("Add")) coop.add();
 ctx.end();
@@ -79,7 +81,7 @@ ctx.end();
 
 Format labels with the frame arena from `ctx.builder().allocator`. Strings passed to widgets have to stay valid until `render`, and the arena is reset at the start of every frame.
 
-Labels also name widgets for screen readers. Text inputs, selects and sliders don't draw their label, so give them a meaningful one anyway.
+Labels also name widgets for screen readers. Text inputs, selects and sliders don't draw their label, so put a `ctx.label` above them when you want the label to be visible. `ctx.label` takes no id, so it can repeat the field's name without a clash.
 
 ## 5. Dialogs
 
@@ -157,7 +159,9 @@ fn frame(coop: *Coop, ctx: *ui.Context) !void {
 
     ctx.begin(.card);
     ctx.heading(4, "Add a hen");
+    ctx.label("Name", .{});
     _ = ctx.textInput("Name", &coop.new_name, "Henrietta");
+    ctx.label("Breed", .{});
     _ = ctx.select("Breed", &breeds, &coop.breed);
     if (ctx.button("Add")) coop.add();
     ctx.end();
@@ -186,6 +190,7 @@ fn frame(coop: *Coop, ctx: *ui.Context) !void {
 
     ctx.begin(.card);
     ctx.heading(4, "Feed");
+    ctx.label("Grams per hen: {d:.0}", .{coop.feed});
     _ = ctx.slider("Grams per hen", &coop.feed, 0, 150);
     ctx.progress(coop.feed / 150);
     if (ctx.buttonVariant("Clear flock", .destructive)) coop.confirm_clear = true;
