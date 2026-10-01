@@ -9,6 +9,8 @@ what you get:
 - **editor tooling**: dockable panels you can split, tab, float, or pop out into their own OS windows, custom title bars whose buttons follow your desktop's layout, an Unreal-style colour picker, and Chrome-style DevTools that can inspect and edit the UI live
 - **accessibility first**: every control reaches screen readers through AccessKit, with keyboard focus, visible focus rings, and cursors that match what's under the pointer
 
+guides and API reference: https://eggyengine.github.io/weeoui/
+
 ## add to project
 requires zig `0.16.0`
 

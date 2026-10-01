@@ -1,4 +1,5 @@
-# Builds Zig's HTML API docs (`zig build docs`) and publishes them to GitHub Pages.
+# Publishes the Docusaurus guide (docs/) at the Pages root and Zig's HTML API docs
+# (`zig build docs`) under /api.
 # Needs Settings > Pages > Source set to "GitHub Actions".
 name: Docs
 
@@ -28,9 +29,24 @@ jobs:
       # Zig 0.16 fetches .zip dependencies into the cache's tmp/ without creating it first.
       - run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
       - run: zig build docs
+      - id: pages
+        uses: actions/configure-pages@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - run: npm ci
+        working-directory: docs
+      - run: npm run build
+        working-directory: docs
+        env:
+          SITE_URL: ${{ steps.pages.outputs.origin }}
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+      - run: cp -r zig-out/docs docs/build/api
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: zig-out/docs
+          path: docs/build
 
   deploy:
     needs: build
