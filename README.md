@@ -28,9 +28,14 @@ const ui = b.dependency("weeoui", .{
     .vitellus = true, // fetches Vitellus, provides `weeoui_vitellus` (rendering)
 });
 
+// The backends are lazy dependencies: on a fresh checkout they appear only after
+// Zig fetches them and reruns build.zig, so return early until then.
+const weeoui_sdl3 = ui.builder.modules.get("weeoui_sdl3") orelse return;
+const weeoui_vitellus = ui.builder.modules.get("weeoui_vitellus") orelse return;
+
 exe.root_module.addImport("weeoui", ui.module("weeoui"));
-exe.root_module.addImport("weeoui_sdl3", ui.module("weeoui_sdl3"));
-exe.root_module.addImport("weeoui_vitellus", ui.module("weeoui_vitellus"));
+exe.root_module.addImport("weeoui_sdl3", weeoui_sdl3);
+exe.root_module.addImport("weeoui_vitellus", weeoui_vitellus);
 ```
 
 if your project already depends on vitellus, build `src/vitellus.zig` against your own copy instead of setting `.vitellus = true`, otherwise you get two vitellus modules:
