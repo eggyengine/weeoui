@@ -35,7 +35,14 @@ float4 fragmentMain(VertexOutput input) : SV_Target0 {
     // Sample and differentiate outside branches: derivatives need uniform control flow.
     float sample = fontAtlas.Sample(fontSampler, input.uv).r;
     float4 color = colorAtlas.Sample(fontSampler, input.uv);
-    float width = max(fwidth(sample), 1e-5);
+    // One screen pixel in field units, from the uv derivatives (constant across a quad) rather
+    // than `fwidth(sample)`: helper pixels along a corner quad's edges sample past the tile,
+    // where the field's derivative is garbage and left half-covered seams around round shapes.
+    // The corner field falls 0.5 per tile (`corner_size` = 64 texels in font.zig).
+    uint atlasWidth, atlasHeight;
+    fontAtlas.GetDimensions(atlasWidth, atlasHeight);
+    float2 texelsPerPixel = fwidth(input.uv * float2(atlasWidth, atlasHeight));
+    float width = max(0.5 / 64.0 * 0.5 * (texelsPerPixel.x + texelsPerPixel.y), 1e-5);
     if (input.mode < -0.5) return float4(color.rgb, color.a * input.color.a);
     float coverage = sample;
     if (input.mode > 0.5) {
