@@ -1,0 +1,8 @@
+.{
+    .name = .weeoui_examples,
+    .version = "0.0.0",
+    .fingerprint = 0x1a7480a125759c71,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{ .weeoui = .{ .path = "../.." } },
+    .paths = .{""},
+}
