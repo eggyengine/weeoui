@@ -1,5 +1,6 @@
-// The Pages workflow sets SITE_URL and BASE_PATH from actions/configure-pages,
-// so a custom domain works without editing this file.
+// The docs workflow sets SITE_URL and BASE_PATH (the Pages base path plus /<branch>) from
+// actions/configure-pages, so a custom domain works without editing this file. DOCS_BRANCH
+// points the "Edit this page" links at the branch being published.
 const baseUrl = `${process.env.BASE_PATH ?? '/weeoui'}/`.replace(/\/+$/, '/');
 
 /** @type {import('@docusaurus/types').Config} */
@@ -15,7 +16,7 @@ export default {
       {
         docs: {
           routeBasePath: '/',
-          editUrl: 'https://github.com/eggyengine/weeoui/edit/main/docs/',
+          editUrl: `https://github.com/eggyengine/weeoui/edit/${process.env.DOCS_BRANCH ?? 'main'}/docs/`,
         },
         blog: false,
       },
