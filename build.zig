@@ -225,7 +225,8 @@ fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, target: std.Target) void
     const accesskit = b.dependency("accesskit_c", .{});
     mod.addIncludePath(accesskit.path("include"));
     mod.link_libc = true;
-    if (target.abi.isAndroid()) return; // no Android build; `accesskit.supported` is false there
+    // No Android or web build; `accesskit.supported` is false there.
+    if (target.abi.isAndroid() or target.os.tag == .emscripten) return;
     const msvc = target.abi == .msvc;
     const library = switch (target.os.tag) {
         .linux => switch (target.cpu.arch) {
