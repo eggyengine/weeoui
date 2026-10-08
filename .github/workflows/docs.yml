@@ -1,59 +1,101 @@
-# Publishes the Docusaurus guide (docs/) at the Pages root and Zig's HTML API docs
-# (`zig build docs`) under /api.
-# Needs Settings > Pages > Source set to "GitHub Actions".
+# Publishes every branch's docs to the gh-pages branch under /<branch>/: the Docusaurus guide
+# (docs/) with Zig's HTML API docs (`zig build docs`) under /<branch>/api. Slashes in branch
+# names become dashes (feature/x -> feature-x). The site root redirects to the default branch,
+# and deleting a branch removes its folder.
+# Needs Settings > Pages > Source set to "Deploy from a branch", branch gh-pages, folder /.
 name: Docs
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
+  delete:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write # push to gh-pages
+  pages: read # site URL, so a custom domain keeps working
 
-# One deploy at a time; a newer push supersedes a queued one.
+# A newer push to the same branch supersedes a queued build. Branches build in parallel;
+# the publish step retries if another branch pushed to gh-pages first.
 concurrency:
-  group: pages
+  group: docs-${{ github.event_name == 'delete' && github.event.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  docs:
+    if: github.event_name != 'delete' || github.event.ref_type == 'branch'
     runs-on: ubuntu-latest
+    env:
+      BRANCH: ${{ github.event_name == 'delete' && github.event.ref || github.ref_name }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
+      - id: slug
+        run: echo "slug=${BRANCH//\//-}" >> "$GITHUB_OUTPUT"
+
+      - if: github.event_name != 'delete'
+        uses: actions/checkout@v7
+      - if: github.event_name != 'delete'
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
       # Zig 0.16 fetches .zip dependencies into the cache's tmp/ without creating it first.
-      - run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
-      - run: zig build docs
-      - id: pages
+      - if: github.event_name != 'delete'
+        run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
+      - if: github.event_name != 'delete'
+        run: zig build docs
+      - if: github.event_name != 'delete'
+        id: pages
         uses: actions/configure-pages@v5
-      - uses: actions/setup-node@v5
+      - if: github.event_name != 'delete'
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: docs/package-lock.json
-      - run: npm ci
+      - if: github.event_name != 'delete'
+        run: npm ci
         working-directory: docs
-      - run: npm run build
+      - if: github.event_name != 'delete'
+        run: npm run build
         working-directory: docs
         env:
           SITE_URL: ${{ steps.pages.outputs.origin }}
-          BASE_PATH: ${{ steps.pages.outputs.base_path }}
-      - run: cp -r zig-out/docs docs/build/api
-      - uses: actions/upload-pages-artifact@v5
-        with:
-          path: docs/build
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}/${{ steps.slug.outputs.slug }}
+          DOCS_BRANCH: ${{ env.BRANCH }}
+      - if: github.event_name != 'delete'
+        run: cp -r zig-out/docs docs/build/api
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v5
+      - name: Publish to gh-pages
+        env:
+          SLUG: ${{ steps.slug.outputs.slug }}
+          BUILD: ${{ github.event_name != 'delete' && 'docs/build' || '' }}
+          REMOTE: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            rm -rf site
+            if git ls-remote --exit-code --heads "$REMOTE" gh-pages >/dev/null; then
+              git clone --quiet --depth 1 --branch gh-pages "$REMOTE" site
+            else
+              git init --quiet -b gh-pages site
+              git -C site remote add origin "$REMOTE"
+            fi
+            rm -rf "site/$SLUG"
+            if [ -n "$BUILD" ]; then cp -r "$BUILD" "site/$SLUG"; fi
+            # Docusaurus and Zig's docs need no Jekyll processing.
+            touch site/.nojekyll
+            if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
+              printf '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=./%s/"><link rel="canonical" href="./%s/"><a href="./%s/">Documentation</a>\n' "$SLUG" "$SLUG" "$SLUG" > site/index.html
+            fi
+            git -C site add -A
+            if git -C site diff --cached --quiet; then exit 0; fi
+            message="Docs for $BRANCH at ${GITHUB_SHA::7}"
+            if [ -z "$BUILD" ]; then message="Remove docs for deleted branch $BRANCH"; fi
+            git -C site commit --quiet -m "$message"
+            if git -C site push --quiet origin gh-pages; then exit 0; fi
+            echo "gh-pages moved; retrying ($attempt)"
+            sleep $((attempt * 5))
+          done
+          exit 1
