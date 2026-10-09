@@ -3,6 +3,7 @@
 //! an application already has its own device and render passes.
 const std = @import("std");
 const vit = @import("vitellus");
+const spirv = @import("vitellus_spirv");
 const ui = @import("weeoui");
 const log = std.log.scoped(.renderer);
 
@@ -63,9 +64,9 @@ pub const Renderer = struct {
             .{ .binding = 2, .resource = .{ .texture_view = color_view } },
         } });
         errdefer font_group.deinit();
-        const vs = try vit.Shader.init(device, .{ .label = "weeoui vert", .stage = .vertex, .source = vit.SPIRVShaderModule.init(.{ .code = @embedFile("shaders/ui.vert.spv") }) });
+        const vs = try vit.Shader.init(device, .{ .label = "weeoui vert", .stage = .vertex, .source = spirv.SPIRVShaderModule.init(.{ .code = @embedFile("shaders/ui.vert.spv") }) });
         defer vs.deinit();
-        const fs = try vit.Shader.init(device, .{ .label = "weeoui frag", .stage = .fragment, .source = vit.SPIRVShaderModule.init(.{ .code = @embedFile("shaders/ui.frag.spv") }) });
+        const fs = try vit.Shader.init(device, .{ .label = "weeoui frag", .stage = .fragment, .source = spirv.SPIRVShaderModule.init(.{ .code = @embedFile("shaders/ui.frag.spv") }) });
         defer fs.deinit();
         const pipeline_layout = try vit.PipelineLayout.init(device, .{ .label = "weeoui layout", .bind_group_layouts = &.{font_layout} });
         errdefer pipeline_layout.deinit();

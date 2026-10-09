@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/vitellus.zig"),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{ .{ .name = "weeoui", .module = mod }, .{ .name = "vitellus", .module = vitellus.module("vitellus") } },
+                .imports = &.{ .{ .name = "weeoui", .module = mod }, .{ .name = "vitellus", .module = vitellus.module("vitellus") }, .{ .name = "vitellus_spirv", .module = vitellus.module("vitellus_spirv") } },
             });
             test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = renderer.?, .use_llvm = true })).step);
         }
