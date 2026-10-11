@@ -39,12 +39,33 @@ addToLibrary({
   weeoui_paste_take__postset: `
     if (typeof document != 'undefined') document.addEventListener('paste', (event) => {
       Module.weeouiPaste = (Module.weeouiPaste ?? '') + event.clipboardData.getData('text/plain');
+      Module.weeouiPasteEventAt = performance.now();
       event.preventDefault();
     });`,
   weeoui_paste_request: () => {
+    // The browser already handed over this paste (Cmd+V on macOS gets through SDL): don't paste twice.
+    if (performance.now() - (Module.weeouiPasteEventAt ?? -1e9) < 1000) return;
     navigator.clipboard?.readText()
       .then((text) => { Module.weeouiPaste = (Module.weeouiPaste ?? '') + text; })
       .catch((error) => console.warn('paste failed:', error));
+  },
+  // A hidden <input type=file>; its answer waits in Module.weeouiFile until the app takes it.
+  weeoui_pick_file: () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.addEventListener('change', () => { Module.weeouiFile = input.files[0] ? { name: input.files[0].name } : { cancelled: true }; });
+    input.addEventListener('cancel', () => { Module.weeouiFile = { cancelled: true }; });
+    input.click();
+  },
+  weeoui_file_take: (out, max) => {
+    const picked = Module.weeouiFile;
+    if (!picked) return -1;
+    Module.weeouiFile = null;
+    if (picked.cancelled) return -2;
+    const bytes = new TextEncoder().encode(picked.name);
+    const len = Math.min(bytes.length, max);
+    HEAPU8.set(bytes.subarray(0, len), out);
+    return len;
   },
   weeoui_paste_take: (out, max) => {
     if (!Module.weeouiPaste) return 0;

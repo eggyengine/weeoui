@@ -3,7 +3,9 @@
 //!
 //! - `textRenderer`: emoji and other glyphs the main font lacks, from the browser's text stack.
 //!   A page can't hand FreeType the system's emoji font.
-//! - `copy` and `takePaste`: the system clipboard. SDL keeps a clipboard of its own on the web.
+//! - `copy`, `requestPaste` and `takePaste`: the system clipboard. SDL keeps a clipboard of its
+//!   own on the web.
+//! - `pickFile` and `takePickedFile`: the browser's file chooser. SDL has no file dialogs there.
 const std = @import("std");
 const font = @import("font.zig");
 
@@ -12,6 +14,8 @@ extern fn weeoui_glyph_pixels(out: [*]u8) void;
 extern fn weeoui_copy(text: [*]const u8, len: usize) void;
 extern fn weeoui_paste_take(out: [*]u8, max: usize) usize;
 extern fn weeoui_paste_request() void;
+extern fn weeoui_pick_file() void;
+extern fn weeoui_file_take(out: [*]u8, max: usize) i32;
 
 /// Set as `Font.platform` to draw missing glyphs on a 2D canvas, where the browser falls back
 /// to the system's color emoji font.
@@ -36,16 +40,15 @@ pub fn copy(text: []const u8) void {
     weeoui_copy(text.ptr, text.len);
 }
 
-/// Read the system clipboard for a paste that didn't come from the keyboard (a menu's Paste).
-/// The browser may ask the user first; the text arrives later through `takePaste`.
+/// Paste from the system clipboard: call it for the paste shortcut and for a menu's Paste. The
+/// browser may ask the user first; the text arrives later through `takePaste`. SDL swallows
+/// Ctrl+V, so the page's own paste event rarely fires; when it does, this doesn't paste twice.
 pub fn requestPaste() void {
     weeoui_paste_request();
 }
 
-/// Text the user pasted (Ctrl+V or Cmd+V) since the last call, or null. Browsers hand pasted
-/// text to the page only in their paste event, so poll this every frame instead of reading the
-/// clipboard when the shortcut arrives. Keyboard events don't reach the paste event unless SDL's
-/// text input is on, so this works while a text field has focus.
+/// Text pasted since the last call (see `requestPaste`), or null. The clipboard answers
+/// asynchronously, so poll this every frame.
 pub fn takePaste(buffer: []u8) ?[]const u8 {
     const len = weeoui_paste_take(buffer.ptr, buffer.len);
     if (len == 0) return null;
@@ -67,4 +70,21 @@ test "a truncated paste ends on a whole character" {
     try std.testing.expectEqualStrings("egg ", wholeCharacters("egg \xf0\x9f\xa5", true));
     try std.testing.expectEqualStrings("egg \u{1f95a}", wholeCharacters("egg \u{1f95a}", true));
     try std.testing.expectEqualStrings("egg \xf0\x9f", wholeCharacters("egg \xf0\x9f", false));
+}
+
+/// Open the browser's file chooser. Call it from a click or key press (browsers refuse
+/// otherwise); the answer arrives later through `takePickedFile`.
+pub fn pickFile() void {
+    weeoui_pick_file();
+}
+
+pub const Picked = union(enum) { file: []const u8, cancelled };
+
+/// The file chosen since the last call (its name, in `buffer`), a cancel, or null for no answer
+/// yet. Poll it every frame.
+pub fn takePickedFile(buffer: []u8) ?Picked {
+    const len = weeoui_file_take(buffer.ptr, buffer.len);
+    if (len == -1) return null;
+    if (len == -2) return .cancelled;
+    return .{ .file = wholeCharacters(buffer[0..@intCast(len)], @as(usize, @intCast(len)) == buffer.len) };
 }
