@@ -531,8 +531,15 @@ pub const Context = struct {
                     const word = key.modifiers.control or key.modifiers.alt;
                     const shift = key.modifiers.shift;
                     switch (key.key) {
-                        .backspace => edit.backspace(),
-                        .delete => edit.delete(),
+                        // With Ctrl or Alt, the whole word beside the caret.
+                        .backspace => {
+                            if (word and edit.selection() == null) edit.moveLeft(true, true);
+                            edit.backspace();
+                        },
+                        .delete => {
+                            if (word and edit.selection() == null) edit.moveRight(true, true);
+                            edit.delete();
+                        },
                         .left => edit.moveLeft(shift, word),
                         .right => edit.moveRight(shift, word),
                         .home => edit.moveHome(shift),
@@ -957,6 +964,11 @@ test "slider drags, select picks, text input types, radio selects, dialog closes
     ctx.handle(.{ .key_down = .{ .key = .backspace, .modifiers = .{}, .repeat = false } });
     try State.frame(&ctx, viewport, &s);
     try std.testing.expectEqualStrings("Egg", s.name.text());
+    // Alt (or Ctrl) with Backspace takes the whole word before the caret.
+    ctx.handle(.{ .text = " laid today" });
+    ctx.handle(.{ .key_down = .{ .key = .backspace, .modifiers = .{ .alt = true }, .repeat = false } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqualStrings("Egg laid ", s.name.text());
 
     // Clicking the second radio's label selects it.
     tap(&ctx, at.center(&ctx, ids[4]));

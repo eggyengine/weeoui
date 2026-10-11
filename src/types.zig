@@ -2,6 +2,11 @@ const std = @import("std");
 
 pub const Color = [3]f32;
 pub const Vec2 = @import("eggenvector").Vec2;
+/// A highlight dragged across static text, from `anchor` (where the drag began) to `focus`, in
+/// layout units. Text isn't selectable unless an app opts in: keep one, set it from drags that
+/// start on no control, paint it with `Canvas.text_selection` and read it with
+/// `Layout.Element.selectedText`. It stays inside the text element it starts in.
+pub const TextSelection = struct { anchor: Vec2, focus: Vec2 };
 /// How the fragment shader reads the atlas: 0 coverage, 1 distance-field fill, 1 + f a
 /// distance-field ring `f` of the radius thick, -1 the color atlas (emoji).
 pub const Vertex = extern struct { position: [2]f32, color: [4]f32, uv: [2]f32, mode: f32 = 0 };

@@ -199,15 +199,31 @@ pub const MenubarMenu = struct { id: u32, label: []const u8, items: []const Menu
 
 /// Desktop-style menu bar. `open_id` is the open menu's trigger id (0 when closed).
 pub fn menubar(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlighted_id: u32, open_submenu: u32) !*L.Element {
+    return menubarWith(b, menus, open_id, highlighted_id, open_submenu, false);
+}
+
+/// Height of `windowMenubar`.
+pub const window_menubar_height: f32 = 32;
+
+/// `menubar` flush with the window's top edge, as an app's main menu: a full-width strip of
+/// `window_menubar_height` instead of a card. Set the result's `style.width` to the window's.
+pub fn windowMenubar(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlighted_id: u32, open_submenu: u32) !*L.Element {
+    return menubarWith(b, menus, open_id, highlighted_id, open_submenu, true);
+}
+
+fn menubarWith(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlighted_id: u32, open_submenu: u32, flush: bool) !*L.Element {
     var children: std.ArrayList(*L.Element) = .empty;
     defer children.deinit(b.allocator);
     for (menus) |entry| {
-        const trigger = try b.node(entry.id, .{ .height = 30 }, .{ .button = .{ .label = entry.label, .variant = .ghost, .hot = entry.id == open_id } }, &.{});
+        const trigger = try b.node(entry.id, .{ .height = if (flush) window_menubar_height - 6 else 30 }, .{ .button = .{ .label = entry.label, .variant = .ghost, .hot = entry.id == open_id } }, &.{});
         trigger.accessibility = .{ .role = .button, .label = entry.label, .expanded = entry.id == open_id };
         try children.append(b.allocator, trigger);
         if (entry.id == open_id) try children.append(b.allocator, anchorTo(try menuItems(b, entry.items, highlighted_id, open_submenu), trigger, .bottom, 100));
     }
-    const bar = try b.node(0, .{ .direction = .row, .gap = 2, .height = 40, .align_items = .center, .padding = .{ .left = 4, .right = 4 } }, .{ .surface = .card }, children.items);
+    const bar = if (flush)
+        try b.node(0, .{ .direction = .row, .grow = 1, .gap = 0, .height = window_menubar_height, .align_items = .center, .padding = .{ .left = 3, .right = 3 } }, .{ .surface = .track }, children.items)
+    else
+        try b.node(0, .{ .direction = .row, .gap = 2, .height = 40, .align_items = .center, .padding = .{ .left = 4, .right = 4 } }, .{ .surface = .card }, children.items);
     bar.accessibility.role = .menu;
     return b.node(0, .{ .direction = .row }, .none, &.{bar});
 }
