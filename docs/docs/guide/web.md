@@ -106,14 +106,15 @@ SDL keeps a clipboard of its own on the web, so text copied with it never leaves
 // On Ctrl+C or Cmd+C (browsers only allow this right after a key press or click):
 ui.web.copy(selected_text);
 
+// On Ctrl+V or Cmd+V, and for a menu's Paste:
+ui.web.requestPaste();
+
 // Every frame, while a text field has focus:
 var buffer: [4096]u8 = undefined;
 if (ui.web.takePaste(&buffer)) |text| insert(text);
 ```
 
-The browser gives the page pasted text only through its paste event, so poll `takePaste` instead of reading the clipboard when Ctrl+V arrives. SDL lets that event through while its text input is on, which is whenever a field has focus.
-
-A Paste that doesn't come from the keyboard, such as a right-click menu's, calls `ui.web.requestPaste()` instead. The browser may ask the user for permission first, and the text arrives through `takePaste` as before.
+The clipboard answers asynchronously, and the browser may ask the user for permission the first time, so the pasted text turns up through `takePaste` a moment later.
 
 ## Differences from the desktop
 

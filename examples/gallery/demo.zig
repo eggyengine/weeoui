@@ -42,6 +42,7 @@ const swatches = [_]ui.Color{
 };
 const W = ui.widgets;
 const native_options = [_][]const u8{ "Low", "Medium", "High", "Ultra" };
+const quality_choices = [_]W.Choice{ .{ .id = 346, .label = "Low" }, .{ .id = 347, .label = "Medium" }, .{ .id = 348, .label = "High" }, .{ .id = 349, .label = "Ultra" } };
 const share_items = [_]W.MenuItem{
     .{ .id = menubar_first_id + 14, .label = "Email link" },
     .{ .id = menubar_first_id + 15, .label = "Messages" },
@@ -88,7 +89,18 @@ const menubar_menus = [_]W.MenubarMenu{
         .{ .kind = .separator },
         .{ .id = menubar_first_id + 44, .label = "Add Profile..." },
     } },
+    // Checked while the panel is docked or floating; closing one from its tab menu unchecks it.
+    .{ .id = menubar_first_id + 5, .label = "Windows", .items = &.{
+        .{ .id = menubar_first_id + 45, .label = "Components", .kind = .checkbox },
+        .{ .id = menubar_first_id + 46, .label = "Scene", .kind = .checkbox },
+        .{ .id = menubar_first_id + 47, .label = "Console", .kind = .checkbox },
+        .{ .id = menubar_first_id + 48, .label = "Notes", .kind = .checkbox },
+        .{ .kind = .separator },
+        .{ .id = menubar_first_id + 49, .label = "DevTools", .shortcut = "F12", .kind = .checkbox },
+    } },
 };
+/// Id of the last top-level menu (File is `menubar_first_id + 1`).
+const menubar_last = menubar_first_id + menubar_menus.len;
 fn menubarStatus(id: u32) []const u8 {
     for (menubar_menus) |entry| for (entry.items) |row| {
         if (row.id == id) return row.label;
@@ -133,6 +145,8 @@ pub const Demo = struct {
     count: u32 = 0,
     select_index: usize = 0,
     select_open: bool = false,
+    /// The Quality dropdown (trigger 345, options 346...349, popup 344).
+    quality_open: bool = false,
     selected_radio: u32 = 330,
     selected_view: u32 = 340,
     open_appearance: bool = true,
@@ -280,7 +294,7 @@ pub const Demo = struct {
     control_cursors: []ui.Cursor = &.{},
     scene_viewport: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     scene_clip: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    overlay_rects: [11]ui.Rect = [_]ui.Rect{.{ .x = 0, .y = 0, .w = 0, .h = 0 }} ** 11,
+    overlay_rects: [12]ui.Rect = [_]ui.Rect{.{ .x = 0, .y = 0, .w = 0, .h = 0 }} ** 12,
 
     pub fn relayout(self: *Demo, allocator: std.mem.Allocator, viewport: ui.Rect, font: *const ui.Font) !void {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -475,7 +489,7 @@ pub const Demo = struct {
         }
         self.focus = self.indexOf(old_id) orelse 0;
         self.markFocus(root, font);
-        for ([_]u32{ 325, 423, 427, 433, 436, 438, 445, menubar_popup_id, submenu_popup_id, nav_popup_id, text_menu_popup_id }, 0..) |id, i| {
+        for ([_]u32{ 325, 423, 427, 433, 436, 438, 445, menubar_popup_id, submenu_popup_id, nav_popup_id, text_menu_popup_id, 344 }, 0..) |id, i| {
             self.overlay_rects[i] = if (root.find(id)) |overlay| overlay.bounds.intersection(overlay.clip) else .{ .x = 0, .y = 0, .w = 0, .h = 0 };
         }
         self.divider_track = if (root.find(481)) |track| track.bounds else .{ .x = 0, .y = 0, .w = 0, .h = 0 };
@@ -821,7 +835,7 @@ pub const Demo = struct {
             self.menubar_highlight = next_row;
             return true;
         }
-        if (id >= menubar_first_id + 1 and id <= menubar_first_id + 4 and self.menubar_open == 0) {
+        if (id >= menubar_first_id + 1 and id <= menubar_last and self.menubar_open == 0) {
             _ = self.dismiss();
             self.menubar_open = id;
             var rows: [16]u32 = undefined;
@@ -835,6 +849,12 @@ pub const Demo = struct {
             _ = self.dismiss();
             self.select_open = true;
             self.restore_focus = 322 + @as(u32, @intCast(self.select_index));
+            return true;
+        }
+        if (id == 345 and !self.quality_open) {
+            _ = self.dismiss();
+            self.quality_open = true;
+            self.restore_focus = 346 + @as(u32, @intCast(self.native_index));
             return true;
         }
         if (id == 419 and !self.menu_open) {
@@ -855,7 +875,7 @@ pub const Demo = struct {
             self.restore_focus = self.command_highlight;
             return true;
         }
-        const all: []const u32 = if (self.select_open and (id == 320 or id >= 322 and id <= 324)) &.{ 322, 323, 324 } else if (self.menu_open and (id == 419 or id == 420 or id == 421)) &.{ 420, 421 } else if (self.context_point != null and (id == 426 or id == 420 or id == 421)) &.{ 420, 421 } else if (self.combo_open and (id == 430 or id == 431 or id == 432)) &.{ 431, 432 } else if (self.command_open and (id == 440 or id == 441 or id == 442)) &.{ 441, 442 } else return false;
+        const all: []const u32 = if (self.select_open and (id == 320 or id >= 322 and id <= 324)) &.{ 322, 323, 324 } else if (self.quality_open and (id == 345 or id >= 346 and id <= 349)) &.{ 346, 347, 348, 349 } else if (self.menu_open and (id == 419 or id == 420 or id == 421)) &.{ 420, 421 } else if (self.context_point != null and (id == 426 or id == 420 or id == 421)) &.{ 420, 421 } else if (self.combo_open and (id == 430 or id == 431 or id == 432)) &.{ 431, 432 } else if (self.command_open and (id == 440 or id == 441 or id == 442)) &.{ 441, 442 } else return false;
         var visible: [3]u32 = undefined;
         var count: usize = 0;
         for (all) |choice| if (self.indexOf(choice) != null) {
@@ -874,7 +894,7 @@ pub const Demo = struct {
     pub fn menuTypeAhead(self: *Demo, text: []const u8) bool {
         if (text.len != 1 or !std.ascii.isAlphabetic(text[0])) return false;
         const id = self.focusId();
-        const choices: []const ui.widgets.Choice = if (self.select_open and (id == 320 or id >= 322 and id <= 324)) &.{ .{ .id = 322, .label = "Compact" }, .{ .id = 323, .label = "Comfortable" }, .{ .id = 324, .label = "Spacious" } } else if ((self.menu_open or self.context_point != null) and (id == 419 or id == 426 or id == 420 or id == 421)) &.{ .{ .id = 420, .label = "Open" }, .{ .id = 421, .label = "Rename" } } else if (self.command_open and (id == 441 or id == 442)) &.{ .{ .id = 441, .label = "New file" }, .{ .id = 442, .label = "New folder" } } else return false;
+        const choices: []const ui.widgets.Choice = if (self.select_open and (id == 320 or id >= 322 and id <= 324)) &.{ .{ .id = 322, .label = "Compact" }, .{ .id = 323, .label = "Comfortable" }, .{ .id = 324, .label = "Spacious" } } else if (self.quality_open and (id == 345 or id >= 346 and id <= 349)) &quality_choices else if ((self.menu_open or self.context_point != null) and (id == 419 or id == 426 or id == 420 or id == 421)) &.{ .{ .id = 420, .label = "Open" }, .{ .id = 421, .label = "Rename" } } else if (self.command_open and (id == 441 or id == 442)) &.{ .{ .id = 441, .label = "New file" }, .{ .id = 442, .label = "New folder" } } else return false;
         for (choices) |choice| {
             if (std.ascii.toLower(choice.label[0]) != std.ascii.toLower(text[0])) continue;
             self.focus = self.indexOf(choice.id) orelse continue;
@@ -916,7 +936,7 @@ pub const Demo = struct {
         const id = self.focusId();
         self.keyboard_focus = true;
         // Left/right across the menubar keeps a menu open, like desktop menu bars.
-        if (self.menubar_open != 0 or (id >= menubar_first_id + 1 and id <= menubar_first_id + 4)) {
+        if (self.menubar_open != 0 or (id >= menubar_first_id + 1 and id <= menubar_last)) {
             if (direction > 0 and self.menubar_open != 0 and id == menubar_first_id + 13) {
                 self.menubar_submenu = id;
                 return true;
@@ -954,18 +974,22 @@ pub const Demo = struct {
     pub fn confirmMenu(self: *Demo) bool {
         if (self.composition_len > 0) return false;
         const id = self.focusId();
-        if (self.menubar_open != 0 and id >= menubar_first_id + 1 and id <= menubar_first_id + 4) {
+        if (self.menubar_open != 0 and id >= menubar_first_id + 1 and id <= menubar_last) {
             self.focus = self.indexOf(self.menubar_highlight) orelse return false;
             self.activate();
             return true;
         }
-        const chosen = if (id == 320 and self.select_open) @as(u32, 322 + @as(u32, @intCast(self.select_index))) else if (id == 419 and self.menu_open) self.menu_highlight else if (id == 430 and self.combo_open) self.combo_highlight else if (id == 440 and self.command_open) self.command_highlight else return false;
+        const chosen = if (id == 320 and self.select_open) @as(u32, 322 + @as(u32, @intCast(self.select_index))) else if (id == 345 and self.quality_open) @as(u32, 346 + @as(u32, @intCast(self.native_index))) else if (id == 419 and self.menu_open) self.menu_highlight else if (id == 430 and self.combo_open) self.combo_highlight else if (id == 440 and self.command_open) self.command_highlight else return false;
         self.focus = self.indexOf(chosen) orelse return false;
         self.activate();
         return true;
     }
     pub fn submitForm(self: *Demo) void {
         self.status = if (self.editable[0].text.text().len == 0) "Project name is required." else "Settings applied.";
+    }
+    pub fn fileCancelled(self: *Demo) void {
+        self.file_picker_open = false;
+        self.status = "File selection cancelled.";
     }
     pub fn selectedFile(self: *Demo, name: []const u8) void {
         self.file_picker_open = false;
@@ -1201,7 +1225,7 @@ pub const Demo = struct {
             return true;
         }
         if (self.dock.dismissMenu()) return true;
-        const had_popup = self.select_open or self.menu_open or self.context_point != null or self.text_menu != null or self.combo_open or self.command_open or self.popover_open or self.menubar_open != 0 or self.nav_open != 0 or self.calendar_open;
+        const had_popup = self.select_open or self.quality_open or self.menu_open or self.context_point != null or self.text_menu != null or self.combo_open or self.command_open or self.popover_open or self.menubar_open != 0 or self.nav_open != 0 or self.calendar_open;
         if (self.menubar_open != 0) self.restore_focus = self.menubar_open;
         if (self.nav_open != 0) self.restore_focus = self.nav_open;
         self.menubar_open = 0;
@@ -1209,6 +1233,7 @@ pub const Demo = struct {
         self.nav_open = 0;
         self.calendar_open = false;
         self.select_open = false;
+        self.quality_open = false;
         self.menu_open = false;
         self.context_point = null;
         self.text_menu = null;
@@ -1224,6 +1249,7 @@ pub const Demo = struct {
     fn popupAnchor(self: *const Demo, id: u32) u32 {
         return switch (id) {
             322...324 => 320,
+            346...349 => 345,
             420, 421 => if (self.context_point != null) 426 else 419,
             431, 432 => 430,
             441, 442 => 440,
@@ -1290,7 +1316,17 @@ pub const Demo = struct {
             },
             accent_id => self.custom_accent = !self.custom_accent,
             342 => self.bold = !self.bold,
-            345 => self.native_index = (self.native_index + 1) % native_options.len,
+            345 => {
+                const open = !self.quality_open;
+                _ = self.dismiss();
+                self.quality_open = open;
+            },
+            346...349 => {
+                self.native_index = id - 346;
+                self.quality_open = false;
+                self.restore_focus = 345;
+                self.status = "Quality selected.";
+            },
             471 => self.attachment_visible = false,
             485, 486, 487 => {
                 _ = self.dismiss();
@@ -1336,7 +1372,7 @@ pub const Demo = struct {
                 self.question = 0;
                 self.answers = .{ 0, 0, 0 };
             },
-            menubar_first_id + 1...menubar_first_id + 4 => {
+            menubar_first_id + 1...menubar_last => {
                 const open = self.menubar_open != id;
                 _ = self.dismiss();
                 self.restore_focus = id;
@@ -1376,6 +1412,11 @@ pub const Demo = struct {
                         self.text_selection = null;
                     },
                     menubar_first_id + 40...menubar_first_id + 42 => self.profile = id,
+                    menubar_first_id + 45...menubar_first_id + 48 => if (self.docked) {
+                        const panel = id - (menubar_first_id + 45) + @intFromEnum(Panel.components);
+                        if (self.dock.nodeOf(panel) != null) self.dock.remove(panel) else self.dock.add(panel, null, .center) catch {};
+                    },
+                    menubar_first_id + 49 => self.toggleDevtools(),
                     else => {},
                 }
                 self.status = menubarStatus(id);
@@ -1568,7 +1609,7 @@ pub const Demo = struct {
 
 fn popupRelated(id: u32) bool {
     return switch (id) {
-        320, 322...324, 419...421, 426, text_menu_first...text_menu_first + 3, 430...432, 435, 437, 439...442, date_button_id, 1001...1039, menubar_first_id + 1...menubar_first_id + 49, nav_first_id...nav_first_id + 19 => true,
+        320, 322...324, 345...349, 419...421, 426, text_menu_first...text_menu_first + 3, 430...432, 435, 437, 439...442, date_button_id, 1001...1039, menubar_first_id + 1...menubar_first_id + 49, nav_first_id...nav_first_id + 19 => true,
         else => false,
     };
 }
@@ -1956,6 +1997,8 @@ fn menubarFor(b: L.Builder, demo: *Demo, flush: bool) !*L.Element {
             menubar_first_id + 31 => demo.full_urls,
             menubar_first_id + 36 => demo.menubar_autohide,
             menubar_first_id + 37 => demo.selectable_text,
+            menubar_first_id + 45...menubar_first_id + 48 => demo.dock.nodeOf(row.id - (menubar_first_id + 45) + @intFromEnum(Panel.components)) != null,
+            menubar_first_id + 49 => demo.dock.nodeOf(@intFromEnum(Panel.elements)) != null or demo.dock.nodeOf(@intFromEnum(Panel.performance)) != null,
             menubar_first_id + 40...menubar_first_id + 42 => row.id == demo.profile,
             else => false,
         };
@@ -2129,9 +2172,13 @@ fn componentGallery(b: L.Builder, demo: *Demo, page_width: f32) !*L.Element {
             try b.node(342, .{ .height = 36 }, .{ .toggle_button = .{ .label = "Bold", .pressed = demo.bold } }, &.{}),
             try label(b, "Quality", 14, true, false),
             blk: {
-                const native = try W.nativeSelect(b, 345, &native_options, demo.native_index);
-                native.style.width = 140;
-                break :blk native;
+                const quality = try W.select(b, 345, native_options[demo.native_index], "Quality");
+                quality.style.width = 140;
+                quality.accessibility.expanded = demo.quality_open;
+                const popup = try W.dropdownMenu(b, quality, &quality_choices, 346 + @as(u32, @intCast(demo.native_index)), demo.quality_open) orelse break :blk quality;
+                popup.id = 344;
+                quality.accessibility.controls = 344;
+                break :blk try b.node(0, .{}, .none, &.{ quality, popup });
             },
         }),
         try b.node(0, .{ .direction = .row, .gap = 8, .wrap = true }, .none, &.{
@@ -2513,7 +2560,7 @@ test "gallery actions, editing, reverse focus and nested wheels update state" {
         question_first_id...question_first_id + 2,
         question_first_id + 17,
         question_first_id + 19,
-        menubar_first_id + 1...menubar_first_id + 4,
+        menubar_first_id + 1...menubar_last,
         nav_first_id...nav_first_id + 2,
         color_first_id...color_first_id + 14,
         first_swatch_id...first_swatch_id + swatches.len - 1,
@@ -3290,4 +3337,21 @@ test "right-clicking a text field opens Cut, Copy, Paste and Select All for it" 
     demo.activateId(text_menu_first + 1);
     try std.testing.expectEqual(.copy, demo.clipboard_request.?);
     try std.testing.expectEqualStrings("Eggy", demo.selectedText().?);
+}
+
+test "the Windows menu closes and reopens dock panels" {
+    var font = try ui.Font.init(std.testing.allocator, ui.default_font);
+    defer font.deinit();
+    var demo: Demo = .{ .docked = true };
+    defer demo.deinit();
+    const viewport = ui.Rect{ .x = 0, .y = 0, .w = 1200, .h = 800 };
+    try demo.relayout(std.testing.allocator, viewport, &font);
+    const scene = @intFromEnum(Panel.scene);
+    for ([_]bool{ false, true }) |open| {
+        demo.activateId(menubar_first_id + 5);
+        try demo.relayout(std.testing.allocator, viewport, &font);
+        demo.activateId(menubar_first_id + 46);
+        try demo.relayout(std.testing.allocator, viewport, &font);
+        try std.testing.expectEqual(open, demo.dock.nodeOf(scene) != null);
+    }
 }

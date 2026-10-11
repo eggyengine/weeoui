@@ -83,7 +83,7 @@ const App = struct {
             .vertices = vertices,
             .frame = frame,
             .system_theme = weeoui_sdl3.systemTheme(),
-            .viewport = undefined,
+            .viewport = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
             .last_ns = sdl3.timer.getNanosecondsSinceInit(),
         };
         try app.syncSize();
@@ -107,7 +107,9 @@ const App = struct {
         const logical = try self.window.window.getSize();
         const pixels = try self.window.window.getSizeInPixels();
         if (logical.@"0" == 0 or logical.@"1" == 0) return;
-        self.viewport = .{ .x = 0, .y = 0, .w = @as(f32, @floatFromInt(logical.@"0")) / self.demo.ui_scale, .h = @as(f32, @floatFromInt(logical.@"1")) / self.demo.ui_scale };
+        const viewport = ui.Rect{ .x = 0, .y = 0, .w = @as(f32, @floatFromInt(logical.@"0")) / self.demo.ui_scale, .h = @as(f32, @floatFromInt(logical.@"1")) / self.demo.ui_scale };
+        if (std.meta.eql(viewport, self.viewport)) return;
+        self.viewport = viewport;
         self.font.dpi_scale = @as(f32, @floatFromInt(pixels.@"0")) / self.viewport.w;
         self.layout_dirty = true;
     }
@@ -142,12 +144,21 @@ const App = struct {
         self.last_ns = now;
         self.demo.animation_phase = @mod(self.demo.animation_phase + @min(dt, 0.25) / 1.2, 1);
         self.demo.tickScroll(dt);
+        // The window size, or the UI scale slider (by drag, click or keys), may have changed it.
+        try self.syncSize();
         if (web) {
             var buffer: [4096]u8 = undefined;
             if (ui.web.takePaste(&buffer)) |text| if (self.demo.isEditing()) {
                 _ = self.demo.insertText(text);
                 self.layout_dirty = true;
             };
+            if (ui.web.takePickedFile(&buffer)) |picked| {
+                switch (picked) {
+                    .file => |name| self.demo.selectedFile(name),
+                    .cancelled => self.demo.fileCancelled(),
+                }
+                self.layout_dirty = true;
+            }
         }
         const pixels = try self.window.window.getSizeInPixels();
         if (pixels.@"0" == 0 or pixels.@"1" == 0) return .run; // minimized
@@ -209,7 +220,6 @@ const App = struct {
                 // popup; laying out on every motion event is what made dragging lag.
                 const popups = .{ demo.hover_card_open, demo.tooltip_open };
                 demo.pointerMoveAt(p.x / scale, p.y / scale, font);
-                if (demo.dragging_slider) try self.syncSize(); // the UI scale slider
                 if (popups[0] != demo.hover_card_open or popups[1] != demo.tooltip_open) self.layout_dirty = true;
             },
             .pointer_down => |button| {
@@ -244,6 +254,12 @@ const App = struct {
             .quit, .terminating, .window_close_requested => return .success,
             .window_resized, .window_pixel_size_changed, .window_display_scale_changed => try self.syncSize(),
             .system_theme_changed => self.system_theme = weeoui_sdl3.systemTheme(),
+            .user => |user| if (user.code == file_event_code) {
+                const chosen: *FileChoice = @ptrCast(@alignCast(user.data1.?));
+                defer std.heap.c_allocator.destroy(chosen);
+                if (chosen.len) |len| demo.selectedFile(chosen.name[0..len]) else demo.fileCancelled();
+                self.layout_dirty = true;
+            },
             else => {},
         }
         if (demo.window_request) |request| {
@@ -263,9 +279,8 @@ const App = struct {
             self.layout_dirty = true;
         }
         if (demo.file_request) {
-            // ponytail: no native picker in the gallery; Eggy shows how to wire `sdl3.dialog.showOpenFile`.
             demo.file_request = false;
-            demo.selectedFile("yolk.png");
+            if (web) ui.web.pickFile() else sdl3.dialog.showOpenFile(anyopaque, fileChosen, null, self.window.window, null, null, false);
         }
         const editing = demo.isEditing();
         if (editing != self.text_input) {
@@ -302,8 +317,8 @@ const App = struct {
                 return;
             },
             .v => {
-                // The browser delivers keyboard pastes through its paste event (see `iterate`).
-                if (!web) self.paste();
+                // In the browser the text arrives a little later (see `iterate`).
+                if (web) ui.web.requestPaste() else self.paste();
                 return;
             },
             else => {},
@@ -358,6 +373,25 @@ const App = struct {
         }
     }
 };
+
+/// SDL user-event code for a file dialog's answer.
+const file_event_code: i32 = -1;
+/// A file dialog's answer: the chosen file's name, or no `len` for a cancel.
+const FileChoice = struct { name: [128]u8 = undefined, len: ?usize = null };
+
+/// SDL may answer from another thread, so hand the result to the event loop as a user event.
+fn fileChosen(_: ?*anyopaque, files: ?[]const [*:0]const u8, _: ?usize, failed: bool) void {
+    const chosen = std.heap.c_allocator.create(FileChoice) catch return;
+    chosen.* = .{};
+    if (failed) std.log.err("file dialog failed: {s}", .{sdl3.errors.get() orelse "unknown"});
+    if (!failed) if (files) |list| if (list.len > 0) {
+        const name = std.fs.path.basename(std.mem.span(list[0]));
+        const len = @min(name.len, chosen.name.len);
+        @memcpy(chosen.name[0..len], name[0..len]);
+        chosen.len = len;
+    };
+    sdl3.events.push(.{ .user = .{ .common = .{ .timestamp = 0 }, .event_type = @intFromEnum(sdl3.events.Type.user), .code = file_event_code, .data1 = chosen } }) catch std.heap.c_allocator.destroy(chosen);
+}
 
 /// The system clipboard: SDL's is the page's own in the browser.
 fn copyText(text: []const u8) void {
