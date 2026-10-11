@@ -21,39 +21,20 @@ zig fetch --save git+https://github.com/eggyengine/weeoui
 
 and then in `build.zig`:
 ```zig
-const ui = b.dependency("weeoui", .{
-    .target = target,
-    .optimize = optimize,
-    .sdl3 = true, // fetches SDL3, provides `weeoui_sdl3` (input)
-    .vitellus = true, // fetches Vitellus, provides `weeoui_vitellus` (rendering)
-});
+const std = @import("std");
 
-// The backends are lazy dependencies: on a fresh checkout they appear only after
-// Zig fetches them and reruns build.zig, so return early until then.
-const weeoui_sdl3 = ui.builder.modules.get("weeoui_sdl3") orelse return;
-const weeoui_vitellus = ui.builder.modules.get("weeoui_vitellus") orelse return;
-
-exe.root_module.addImport("weeoui", ui.module("weeoui"));
-exe.root_module.addImport("weeoui_sdl3", weeoui_sdl3);
-exe.root_module.addImport("weeoui_vitellus", weeoui_vitellus);
+pub fn build(b: *std.Build) void {
+    @import("weeoui").addApp(b, .{ .name = "counter", .root_source_file = b.path("src/main.zig") });
+}
 ```
 
-if your project already depends on vitellus, build `src/vitellus.zig` against your own copy instead of setting `.vitellus = true`, otherwise you get two vitellus modules:
-```zig
-exe.root_module.addImport("weeoui_vitellus", b.createModule(.{
-    .root_source_file = ui.path("src/vitellus.zig"),
-    .target = target,
-    .optimize = optimize,
-    .imports = &.{
-        .{ .name = "weeoui", .module = ui.module("weeoui") },
-        .{ .name = "vitellus", .module = vit.module("vitellus") },
-    },
-}));
-```
+that builds your app for wherever `-Dtarget` points (desktop, `wasm32-emscripten` for the browser, `aarch64-linux-android.35` for a phone), and sets up logging, panics and each platform's entry point for you. `zig build run` starts it.
+
+embedding weeoui in your own engine instead? enable the backends you want on the dependency (`.sdl3 = true`, `.vitellus = true`) and import the modules; see [getting started](https://eggyengine.github.io/weeoui/getting-started) for building the renderer against your own copy of vitellus.
 
 ## quick start
 
-weeoui is immediate mode: each frame you call widgets from your own state, and they return what the user did. with both backends enabled (`.sdl3 = true, .vitellus = true`), `weeoui_sdl3.run` opens the window and handles the GPU, input, displays and more for you. 
+weeoui is immediate mode: each frame you call widgets from your own state, and they return what the user did. `weeoui_sdl3.run` opens the window and handles the GPU, mouse, touch, keyboard, clipboard, displays and more for you, on the desktop, android and the web.
 
 ```zig
 const std = @import("std");
@@ -75,5 +56,5 @@ fn frame(count: *u32, ctx: *ui.Context) !void {
 
 the runnable version is [`examples/counter.zig`](examples/counter.zig):
 ```bash
-zig build counter -Dsdl3 -Dvitellus
+zig build counter
 ```

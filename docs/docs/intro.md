@@ -29,6 +29,8 @@ fn frame(count: *u32, ctx: *ui.Context) !void {
 
 ## Modules
 
+`addApp` gives an app all three. Engines that embed Weeoui enable the backends they want on the dependency.
+
 | Module | Build flag | Purpose |
 | --- | --- | --- |
 | `weeoui` | always | `Context`, widgets, layout, fonts and images. Has no platform dependencies. |

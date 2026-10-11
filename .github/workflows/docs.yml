@@ -54,7 +54,7 @@ jobs:
           source ~/emsdk/emsdk_env.sh
           embuilder build emdawnwebgpu
       - if: github.event_name != 'delete'
-        run: zig build -Dsdl3 -Dvitellus -Dtarget=wasm32-emscripten -Doptimize=ReleaseFast
+        run: zig build -Dtarget=wasm32-emscripten -Doptimize=ReleaseFast
       - if: github.event_name != 'delete'
         id: pages
         uses: actions/configure-pages@v5
