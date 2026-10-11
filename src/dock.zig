@@ -479,6 +479,13 @@ pub const DockSpace = struct {
         }
         return true;
     }
+    /// Middle click: close the panel whose tab is `id`, like a browser tab. Returns whether `id`
+    /// was a tab.
+    pub fn closeTab(self: *DockSpace, id: u32) bool {
+        if (id <= tab_first or id >= tab_first + max_panel) return false;
+        self.remove(id - tab_first);
+        return true;
+    }
     /// Close the open stack menu (a press elsewhere, or Escape). Returns whether one was open.
     pub fn dismissMenu(self: *DockSpace) bool {
         defer self.menu = none;
@@ -1047,6 +1054,15 @@ test "dropping a tab on a tab bar puts it between the tabs under the pointer" {
     dock.dragTo((spans[0][1] + spans[1][1]) / 2 - 10, 15);
     dock.release((spans[0][1] + spans[1][1]) / 2 - 10, 15);
     try std.testing.expectEqualSlices(u32, &.{ 2, 4, 3, 1 }, dock.nodes[dock.nodeOf(2).?].panels[0..4]);
+}
+
+test "middle-clicking a tab closes its panel" {
+    var dock = DockSpace.init();
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .center);
+    try std.testing.expect(dock.closeTab(tab_first + 2));
+    try std.testing.expect(dock.nodeOf(2) == null and dock.nodeOf(1) != null);
+    try std.testing.expect(!dock.closeTab(menu_first));
 }
 
 test "the stack menu closes a panel, and add brings it back" {
