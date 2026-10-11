@@ -1,8 +1,9 @@
 struct VertexInput {
-    [[vk::location(0)]] float2 position : POSITION;
-    [[vk::location(1)]] float4 color : COLOR0;
-    [[vk::location(2)]] float2 uv : TEXCOORD0;
-    [[vk::location(3)]] float mode : TEXCOORD1;
+    // WGSL ignores vk::location and numbers inputs by semantic, so keep these in order.
+    [[vk::location(0)]] float2 position : TEXCOORD0;
+    [[vk::location(1)]] float4 color : TEXCOORD1;
+    [[vk::location(2)]] float2 uv : TEXCOORD2;
+    [[vk::location(3)]] float mode : TEXCOORD3;
 };
 struct VertexOutput {
     float4 position : SV_Position;

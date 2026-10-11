@@ -841,8 +841,9 @@ fn facts(b: L.Builder, element: *const L.Element) !*L.Element {
 pub var console: ?*Devtools = null;
 
 /// `std.Options.logFn` that also shows info, warnings and errors in the DevTools console.
+/// In the browser, where Zig 0.16 can't build its stderr logger, it writes to the browser console.
 pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
-    std.log.defaultLog(level, scope, format, args);
+    if (@import("builtin").os.tag == .emscripten) browserLog(level, scope, format, args) else std.log.defaultLog(level, scope, format, args);
     const sink = console orelse return;
     const mapped: Level = switch (level) {
         .err => .err,
@@ -851,6 +852,17 @@ pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comp
         .debug => return,
     };
     sink.log(mapped, format, args);
+}
+
+fn browserLog(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
+    const emscripten = struct {
+        extern fn emscripten_console_log(message: [*:0]const u8) void;
+        extern fn emscripten_console_error(message: [*:0]const u8) void;
+    };
+    var buffer: [1024]u8 = undefined;
+    const prefix = "[" ++ @tagName(level) ++ "] " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ");
+    const message = std.fmt.bufPrintZ(&buffer, prefix ++ format, args) catch "[log message too long]";
+    if (@intFromEnum(level) <= @intFromEnum(std.log.Level.warn)) emscripten.emscripten_console_error(message) else emscripten.emscripten_console_log(message);
 }
 
 fn showElements(tools: *Devtools, b: L.Builder, font: *const Font, page: *const L.Element, area: Rect) !*L.Element {

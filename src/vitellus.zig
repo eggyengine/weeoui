@@ -64,9 +64,9 @@ pub const Renderer = struct {
             .{ .binding = 2, .resource = .{ .texture_view = color_view } },
         } });
         errdefer font_group.deinit();
-        const vs = try vit.Shader.init(device, .{ .label = "weeoui vert", .stage = .vertex, .source = spirv.SPIRVShaderModule.init(.{ .code = @embedFile("shaders/ui.vert.spv") }) });
+        const vs = try vit.Shader.init(device, .{ .label = "weeoui vert", .stage = .vertex, .source = shaderSource("vert", "vertexMain") });
         defer vs.deinit();
-        const fs = try vit.Shader.init(device, .{ .label = "weeoui frag", .stage = .fragment, .source = spirv.SPIRVShaderModule.init(.{ .code = @embedFile("shaders/ui.frag.spv") }) });
+        const fs = try vit.Shader.init(device, .{ .label = "weeoui frag", .stage = .fragment, .source = shaderSource("frag", "fragmentMain") });
         defer fs.deinit();
         const pipeline_layout = try vit.PipelineLayout.init(device, .{ .label = "weeoui layout", .bind_group_layouts = &.{font_layout} });
         errdefer pipeline_layout.deinit();
@@ -189,7 +189,7 @@ pub const Painter = struct {
 
     /// `extent` is the window size in physical pixels; `font` seeds the glyph atlases.
     pub fn init(gpa: std.mem.Allocator, window: vit.Window, extent: vit.Extent2D, font: *const ui.Font) !Painter {
-        const instance = try vit.Instance.init(gpa, .{ .backend = .{ .vulkan = true }, .validation = .none });
+        const instance = try vit.Instance.init(gpa, .{ .backend = .{ .vulkan = true, .webgpu = true }, .validation = .none });
         errdefer instance.deinit();
         const adapter = try vit.Adapter.init(instance, .{});
         errdefer adapter.deinit();
@@ -338,6 +338,13 @@ pub fn colorFormat(format: vit.SwapchainFormat) vit.Format {
         .rgba8_unorm_srgb => .rgba8_unorm_srgb,
         .rgba16_float => .rgba16_float,
     };
+}
+
+/// WGSL in the browser (WebGPU), SPIR-V everywhere else. Both are compiled from `shaders/ui.slang`.
+fn shaderSource(comptime stage: []const u8, entry_point: []const u8) vit.ShaderModule {
+    if (@import("builtin").os.tag == .emscripten)
+        return vit.BinaryShaderModule.init(.{ .backend = .webgpu, .format = .wgsl, .bytes = @embedFile("shaders/ui." ++ stage ++ ".wgsl"), .entry_point = entry_point });
+    return spirv.SPIRVShaderModule.init(.{ .code = @embedFile("shaders/ui." ++ stage ++ ".spv") });
 }
 
 fn createVertexBuffer(device: vit.Device, capacity: usize) !vit.Buffer {
