@@ -3,6 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // Browser builds (WebGPU) link with Emscripten; its sysroot must be set before any C dependency.
+    const web = target.result.os.tag == .emscripten;
+    const emscripten = if (web) (b.lazyImport(@This(), "vitellus") orelse return).Emscripten.init(b, target, b.option([]const u8, "emsdk", "Path to emsdk for web builds (default: $EMSDK, then ~/emsdk)")) else null;
     const mod = b.addModule("weeoui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -38,6 +41,8 @@ pub fn build(b: *std.Build) void {
         makePic(freetype.artifact("freetype"));
     }
     linkAccessKit(b, mod, target.result);
+    // Web apps that use `ui.web` link this with `emcc --js-library`.
+    b.addNamedLazyPath("web_js", b.path("src/web.js"));
     const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod, .use_llvm = true }));
     const test_step = b.step("test", "Check Weeoui module");
     test_step.dependOn(&tests.step);
@@ -46,7 +51,11 @@ pub fn build(b: *std.Build) void {
     var sdl3_dep: ?*std.Build.Dependency = null;
     var adapter: ?*std.Build.Module = null;
     if (b.option(bool, "sdl3", "Provide the weeoui_sdl3 input adapter module") orelse false) {
-        if (b.lazyDependency("sdl3", .{ .target = target, .optimize = optimize })) |sdl3| {
+        const sdl3_lazy = if (emscripten) |em|
+            b.lazyDependency("sdl3", .{ .target = target, .optimize = optimize, .sdl_system_include_path = em.include })
+        else
+            b.lazyDependency("sdl3", .{ .target = target, .optimize = optimize });
+        if (sdl3_lazy) |sdl3| {
             sdl3_dep = sdl3;
             adapter = b.addModule("weeoui_sdl3", .{
                 .root_source_file = b.path("src/sdl3.zig"),
@@ -89,6 +98,35 @@ pub fn build(b: *std.Build) void {
         adapter.?.addImport("weeoui_vitellus", renderer.?);
         // `zig build counter|demo -Dsdl3 -Dvitellus`: the README quick start and the component
         // gallery. With an Android `-Dtarget` they build, install and launch APKs instead.
+        const gallery = b.createModule(.{
+            .root_source_file = b.path("examples/gallery/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "weeoui", .module = mod },
+                .{ .name = "weeoui_sdl3", .module = adapter.? },
+                .{ .name = "weeoui_vitellus", .module = renderer.? },
+                .{ .name = "vitellus", .module = vitellus_module },
+                .{ .name = "vitellus_sdl3", .module = sdl_window },
+            },
+        });
+        const gallery_step = b.step("gallery", "Run the full component gallery: docking, DevTools and every widget");
+        if (emscripten) |em| {
+            // `zig build gallery -Dsdl3 -Dvitellus -Dtarget=wasm32-emscripten`: zig-out/web/gallery.html.
+            const app = em.addApp(b, .{
+                .name = "gallery",
+                .root_module = gallery,
+                .shell_file = b.path("examples/gallery/shell.html"),
+                // The font atlases and the gallery's Debug frames outgrow Vitellus's 1 MiB stack.
+                .args = &.{ "-sSTACK_SIZE=8388608", "--js-library", b.pathFromRoot("src/web.js") },
+            });
+            gallery_step.dependOn(&app.run.step);
+            return;
+        }
+        addDesktopExample(b, gallery_step, "gallery", gallery);
+        const gallery_tests = b.createModule(.{ .root_source_file = b.path("examples/gallery/demo.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "weeoui", .module = mod }} });
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gallery_tests, .use_llvm = true })).step);
         const apps = [_]App{
             .{ .name = "counter", .module = example(b, "counter", mod, adapter.?), .step = b.step("counter", "Run the counter example") },
             .{ .name = "demo", .module = example(b, "demo", mod, adapter.?), .step = b.step("demo", "Run the component gallery") },

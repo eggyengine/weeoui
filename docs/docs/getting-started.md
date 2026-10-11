@@ -76,6 +76,9 @@ fn frame(count: *u32, ctx: *ui.Context) !void {
 ```bash
 zig build counter -Dsdl3 -Dvitellus  # the counter above
 zig build demo -Dsdl3 -Dvitellus     # every component
+zig build gallery -Dsdl3 -Dvitellus  # the full gallery: docking, DevTools and every widget
 ```
+
+The gallery also builds for the browser. See [Run in the browser](./guide/web.md), or [open the live demo](pathname:///demo/).
 
 You can cross-compile for Windows with `-Dtarget=x86_64-windows`, or for Android with `-Dtarget=aarch64-linux-android`.

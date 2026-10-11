@@ -1,5 +1,5 @@
 # Publishes docs to the gh-pages branch: the Docusaurus guide (docs/) with Zig's HTML API docs
-# (`zig build docs`) under api/. The default branch lives at the site root and every other
+# (`zig build docs`) under api/ and the component gallery, built for WebGPU, under demo/. The default branch lives at the site root and every other
 # branch under /<branch>/, with slashes turned into dashes (feature/x -> feature-x). Deleting a
 # branch removes its folder.
 # Needs Settings > Pages > Source set to "Deploy from a branch", branch gh-pages, folder /.
@@ -43,6 +43,18 @@ jobs:
         run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
       - if: github.event_name != 'delete'
         run: zig build docs
+      # The gallery for the browser: Emscripten in ~/emsdk (where Vitellus looks), plus Dawn's
+      # WebGPU bindings, which Vitellus reads its headers from.
+      - if: github.event_name != 'delete'
+        name: Install Emscripten
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk ~/emsdk
+          ~/emsdk/emsdk install 6.0.11
+          ~/emsdk/emsdk activate 6.0.11
+          source ~/emsdk/emsdk_env.sh
+          embuilder build emdawnwebgpu
+      - if: github.event_name != 'delete'
+        run: zig build -Dsdl3 -Dvitellus -Dtarget=wasm32-emscripten -Doptimize=ReleaseFast
       - if: github.event_name != 'delete'
         id: pages
         uses: actions/configure-pages@v5
@@ -64,6 +76,11 @@ jobs:
           DOCS_BRANCH: ${{ env.BRANCH }}
       - if: github.event_name != 'delete'
         run: cp -r zig-out/docs docs/build/api
+      - if: github.event_name != 'delete'
+        run: |
+          mkdir docs/build/demo
+          cp zig-out/web/gallery.js zig-out/web/gallery.wasm docs/build/demo/
+          cp zig-out/web/gallery.html docs/build/demo/index.html
 
       - name: Publish to gh-pages
         env:

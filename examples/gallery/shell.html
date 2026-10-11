@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weeoui gallery</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #1c1915; color: #f5f1ea; font: 15px system-ui, sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+    #status { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; padding: 16px; }
+    #status[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+  <div id="status">Loading Weeoui…</div>
+  <script>
+    const status = document.getElementById('status');
+    if (!navigator.gpu) status.textContent = 'This demo needs WebGPU. Try a recent Chrome, Edge, or Safari 26.';
+    var Module = {
+      canvas: document.getElementById('canvas'),
+      // SDL starts drawing once main hands it the callbacks.
+      onRuntimeInitialized() { status.hidden = true; document.getElementById('canvas').focus(); },
+      onAbort(what) { status.hidden = false; status.textContent = 'Weeoui stopped: ' + what; },
+    };
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>
