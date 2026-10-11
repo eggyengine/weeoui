@@ -31,7 +31,8 @@ const menu_item_first = first_id + 0x1_0600;
 /// Floating windows' close/minimize/maximize: + floating * 3 + `titlebar.Button`.
 const window_button_first = first_id + 0x1_0800;
 const last_id = window_button_first + max_floating * 3;
-fn owns(id: u32) bool {
+/// Whether `id` is one of the dock's own controls (tabs, splitters, window buttons, menus).
+pub fn owns(id: u32) bool {
     return id >= first_id and id < last_id;
 }
 

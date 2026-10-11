@@ -24,7 +24,11 @@ pub const ScrollState = struct {
     overlay_bar: bool = false,
     /// Seconds the overlay bar stays visible; refreshed by scrolling, drained by `tick`.
     recent: f32 = 0,
+    /// Glide left by a fling, in offset units per second; `tick` moves and slows it.
+    velocity: Vec2 = .zero,
     pub const recent_seconds: f32 = 1.2;
+    /// How fast a fling slows down, per second.
+    const friction: f32 = 4;
     const overlay_width: f32 = 10;
 
     pub fn clamp(self: *ScrollState) void {
@@ -32,6 +36,19 @@ pub const ScrollState = struct {
         self.offset.y = std.math.clamp(self.offset.y, 0, @max(0, self.content.y - self.viewport.h));
         if (self.dragging == .horizontal and self.content.x <= self.viewport.w) self.dragging = .none;
         if (self.dragging == .vertical and self.content.y <= self.viewport.h) self.dragging = .none;
+    }
+    /// A finger dragged the content by `delta`: it follows the finger.
+    pub fn pan(self: *ScrollState, delta: Vec2) void {
+        if (self.message_mode and delta.y > 0) self.following_messages = false;
+        self.velocity = .zero;
+        self.offset = self.offset.sub(delta);
+        self.clamp();
+        self.recent = recent_seconds;
+    }
+    /// The finger let go moving at `finger_velocity` (units per second): the content glides on
+    /// and slows down, like a phone's scroll views.
+    pub fn fling(self: *ScrollState, finger_velocity: Vec2) void {
+        self.velocity = finger_velocity.scale(-1);
     }
     pub fn wheel(self: *ScrollState, dx: f32, dy: f32) void {
         if (self.message_mode and dy > 0) self.following_messages = false;
@@ -102,6 +119,18 @@ pub const ScrollState = struct {
     }
     pub fn tick(self: *ScrollState, dt: f32) void {
         self.recent = @max(0, self.recent - dt);
+        if (@abs(self.velocity.x) + @abs(self.velocity.y) < 20) {
+            self.velocity = .zero;
+            return;
+        }
+        const before = self.offset;
+        self.offset = self.offset.add(self.velocity.scale(dt));
+        self.clamp();
+        // Stop at an edge instead of pushing against it.
+        if (self.offset.x == before.x) self.velocity.x = 0;
+        if (self.offset.y == before.y) self.velocity.y = 0;
+        self.velocity = self.velocity.scale(@exp(-friction * dt));
+        self.recent = recent_seconds;
     }
     pub fn barVisible(self: *const ScrollState) bool {
         return !self.overlay_bar or self.recent > 0 or self.dragging != .none;
@@ -235,4 +264,24 @@ test "a wheel to the right scrolls wide content to the right, and down scrolls d
     try std.testing.expectEqual(@as(f32, 40), state.offset.y);
     state.wheel(-1, 0);
     try std.testing.expectEqual(@as(f32, 0), state.offset.x);
+}
+
+test "a fling glides on, slows down and stops at the edge" {
+    var state = ScrollState{};
+    state.updateLayout(.{ .x = 0, .y = 0, .w = 100, .h = 100 }, Vec2.init(100, 1000));
+    state.pan(Vec2.init(0, -30));
+    try std.testing.expectEqual(@as(f32, 30), state.offset.y);
+    // The finger flicks upward at 600 units per second: the content keeps moving down.
+    state.fling(Vec2.init(0, -600));
+    state.tick(0.1);
+    const after_one = state.offset.y;
+    try std.testing.expect(after_one > 80);
+    state.tick(0.1);
+    try std.testing.expect(state.offset.y - after_one < after_one - 30); // slower
+    for (0..200) |_| state.tick(1.0 / 60.0);
+    try std.testing.expect(state.velocity.y == 0 and state.offset.y <= 900);
+    // A new touch stops it dead.
+    state.fling(Vec2.init(0, 2000));
+    state.pan(.zero);
+    try std.testing.expect(state.velocity.y == 0);
 }

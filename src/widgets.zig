@@ -223,9 +223,11 @@ fn menubarWith(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlight
     const bar = if (flush)
         try b.node(0, .{ .direction = .row, .grow = 1, .gap = 0, .height = window_menubar_height, .align_items = .center, .padding = .{ .left = 3, .right = 3 } }, .{ .surface = .track }, children.items)
     else
-        try b.node(0, .{ .direction = .row, .gap = 2, .height = 40, .align_items = .center, .padding = .{ .left = 4, .right = 4 } }, .{ .surface = .card }, children.items);
+        // Wraps onto a second line on narrow screens rather than spilling out.
+        try b.node(0, .{ .direction = .row, .gap = 2, .min_height = 40, .wrap = true, .align_items = .center, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 } }, .{ .surface = .card }, children.items);
     bar.accessibility.role = .menu;
-    return b.node(0, .{ .direction = .row }, .none, &.{bar});
+    // A column hands the bar the space it has, so a long one wraps; `.start` keeps it hugging its menus.
+    return b.node(0, if (flush) .{ .direction = .row } else .{ .align_items = .start }, .none, &.{bar});
 }
 
 pub const NavigationLink = struct { id: u32, title: []const u8, description: []const u8 = "" };

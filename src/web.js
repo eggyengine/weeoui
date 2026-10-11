@@ -49,6 +49,71 @@ addToLibrary({
       .then((text) => { Module.weeouiPaste = (Module.weeouiPaste ?? '') + text; })
       .catch((error) => console.warn('paste failed:', error));
   },
+  // Resolve on the browser's next display frame; the wasm stack waits (ASYNCIFY).
+  weeoui_next_frame__async: true,
+  weeoui_next_frame: () => Asyncify.handleAsync(() => new Promise((resolve) => requestAnimationFrame(() => resolve()))),
+
+  // The on-screen keyboard. A page can only raise it by focusing something editable during a
+  // touch, so a hidden input waits for touches on the text fields the app reported, and what is
+  // typed into it queues up for `weeoui_keyboard_take` instead of reaching SDL.
+  $weeouiKeyboard: () => {
+    if (Module.weeouiInput) return Module.weeouiInput;
+    const input = document.createElement('input');
+    Object.assign(input, { autocomplete: 'off', autocapitalize: 'off', spellcheck: false });
+    input.setAttribute('autocorrect', 'off');
+    // 16px keeps iOS from zooming in on focus.
+    input.style.cssText = 'position:fixed;left:0;bottom:0;width:1px;height:1px;opacity:0;font-size:16px;border:0;padding:0;-webkit-user-select:text;user-select:text;';
+    document.body.appendChild(input);
+    const queue = (Module.weeouiTyped = []);
+    let composing = false;
+    const flush = () => { if (input.value) queue.push(input.value); input.value = ''; };
+    input.addEventListener('compositionstart', () => { composing = true; });
+    input.addEventListener('compositionend', () => { composing = false; flush(); });
+    input.addEventListener('input', () => { if (!composing) flush(); });
+    input.addEventListener('beforeinput', (event) => {
+      if (event.inputType === 'deleteContentBackward' && !input.value) { queue.push(-2); event.preventDefault(); }
+      if (event.inputType === 'insertLineBreak') { queue.push(-3); event.preventDefault(); }
+    });
+    const keys = { Enter: -3, Delete: -4, ArrowLeft: -5, ArrowRight: -6, Tab: -7, Escape: -8 };
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation(); // typed here, not on the page: keep SDL from seeing it twice
+      if (event.key === 'Backspace' && !input.value && !composing) { queue.push(-2); event.preventDefault(); }
+      else if (keys[event.key]) { queue.push(keys[event.key]); event.preventDefault(); }
+    });
+    input.addEventListener('keypress', (event) => event.stopPropagation());
+    input.addEventListener('keyup', (event) => event.stopPropagation());
+    // A finger (or pen) lifting counts as a user gesture, so focusing here raises the keyboard.
+    Module.canvas.addEventListener('pointerup', (event) => {
+      if (event.pointerType === 'mouse') return;
+      const rect = Module.canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left, y = event.clientY - rect.top;
+      if ((Module.weeouiTextFields ?? []).some((f) => x >= f[0] && x < f[0] + f[2] && y >= f[1] && y < f[1] + f[3])) input.focus({ preventScroll: true });
+    }, { capture: true });
+    return (Module.weeouiInput = input);
+  },
+  weeoui_text_fields__deps: ['$weeouiKeyboard'],
+  weeoui_text_fields: (rects, count) => {
+    weeouiKeyboard();
+    const fields = [];
+    for (let i = 0; i < count; i++) fields.push(Array.from(HEAPF32.subarray((rects >> 2) + i * 4, (rects >> 2) + i * 4 + 4)));
+    Module.weeouiTextFields = fields;
+  },
+  weeoui_keyboard__deps: ['$weeouiKeyboard'],
+  weeoui_keyboard: (open) => {
+    const input = weeouiKeyboard();
+    if (!open && document.activeElement === input) input.blur();
+  },
+  weeoui_keyboard_take: (out, max) => {
+    const queue = Module.weeouiTyped;
+    if (!queue || !queue.length) return -1;
+    const next = queue.shift();
+    if (typeof next === 'number') return next;
+    const bytes = new TextEncoder().encode(next);
+    const len = Math.min(bytes.length, max);
+    HEAPU8.set(bytes.subarray(0, len), out);
+    return len;
+  },
+
   // A hidden <input type=file>; its answer waits in Module.weeouiFile until the app takes it.
   weeoui_pick_file: () => {
     const input = document.createElement('input');

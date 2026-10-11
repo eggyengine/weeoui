@@ -6,6 +6,9 @@
 //! - `copy`, `requestPaste` and `takePaste`: the system clipboard. SDL keeps a clipboard of its
 //!   own on the web.
 //! - `pickFile` and `takePickedFile`: the browser's file chooser. SDL has no file dialogs there.
+//! - `nextFrame`: wait for the browser's next display frame, so a frame loop can run in a page.
+//! - `setTextFields`, `setKeyboard` and `nextKeyboardInput`: the phone's on-screen keyboard.
+//! - `log`: `std.log` to the browser console (Zig 0.16 can't build its stderr logger there).
 const std = @import("std");
 const font = @import("font.zig");
 
@@ -15,6 +18,12 @@ extern fn weeoui_copy(text: [*]const u8, len: usize) void;
 extern fn weeoui_paste_take(out: [*]u8, max: usize) usize;
 extern fn weeoui_paste_request() void;
 extern fn weeoui_pick_file() void;
+extern fn weeoui_next_frame() void;
+extern fn weeoui_text_fields(rects: [*]const f32, count: usize) void;
+extern fn weeoui_keyboard(open: bool) void;
+extern fn weeoui_keyboard_take(out: [*]u8, max: usize) i32;
+extern fn emscripten_console_log(message: [*:0]const u8) void;
+extern fn emscripten_console_error(message: [*:0]const u8) void;
 extern fn weeoui_file_take(out: [*]u8, max: usize) i32;
 
 /// Set as `Font.platform` to draw missing glyphs on a 2D canvas, where the browser falls back
@@ -87,4 +96,51 @@ pub fn takePickedFile(buffer: []u8) ?Picked {
     if (len == -1) return null;
     if (len == -2) return .cancelled;
     return .{ .file = wholeCharacters(buffer[0..@intCast(len)], @as(usize, @intCast(len)) == buffer.len) };
+}
+
+/// Yield to the browser until its next display frame (`requestAnimationFrame`), so the page
+/// stays responsive and a frame loop runs at the display's rate. Needs Emscripten's ASYNCIFY.
+pub fn nextFrame() void {
+    weeoui_next_frame();
+}
+
+/// Where text fields are, in window points. Touching one opens the phone's keyboard: browsers
+/// only allow that during the touch itself, before the app has seen it.
+pub fn setTextFields(rects: []const @import("types.zig").Rect) void {
+    var flat: [64 * 4]f32 = undefined;
+    const count = @min(rects.len, 64);
+    for (rects[0..count], 0..) |r, i| flat[i * 4 ..][0..4].* = .{ r.x, r.y, r.w, r.h };
+    weeoui_text_fields(&flat, count);
+}
+
+/// Keep the on-screen keyboard open while a text field has focus; false closes it.
+pub fn setKeyboard(open: bool) void {
+    weeoui_keyboard(open);
+}
+
+pub const KeyboardInput = union(enum) { text: []const u8, key: @import("input.zig").Key };
+
+/// The next text or key typed on the on-screen keyboard, or null. Keys typed there don't reach
+/// SDL, so feed these to the UI as `.text` and `.key_down` events.
+pub fn nextKeyboardInput(buffer: []u8) ?KeyboardInput {
+    const len = weeoui_keyboard_take(buffer.ptr, buffer.len);
+    return switch (len) {
+        -1 => null,
+        -2 => .{ .key = .backspace },
+        -3 => .{ .key = .enter },
+        -4 => .{ .key = .delete },
+        -5 => .{ .key = .left },
+        -6 => .{ .key = .right },
+        -7 => .{ .key = .tab },
+        -8 => .{ .key = .escape },
+        else => .{ .text = wholeCharacters(buffer[0..@intCast(len)], @as(usize, @intCast(len)) == buffer.len) },
+    };
+}
+
+/// `std.Options.logFn` for the browser console.
+pub fn log(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
+    var buffer: [1024]u8 = undefined;
+    const prefix = "[" ++ @tagName(level) ++ "] " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ");
+    const message = std.fmt.bufPrintZ(&buffer, prefix ++ format, args) catch "[log message too long]";
+    if (@intFromEnum(level) <= @intFromEnum(std.log.Level.warn)) emscripten_console_error(message) else emscripten_console_log(message);
 }

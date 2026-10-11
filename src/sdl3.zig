@@ -5,6 +5,7 @@ const sdl3 = @import("sdl3");
 const ui = @import("weeoui");
 const Vec2 = ui.Vec2;
 const log = std.log.scoped(.window);
+const web = builtin.os.tag == .emscripten;
 
 pub const RunOptions = struct {
     title: [:0]const u8 = "weeoui",
@@ -17,7 +18,8 @@ pub const RunOptions = struct {
 };
 
 /// Open a window and call `frame(state, ctx)` every frame until it is closed: the
-/// window, GPU, input, HiDPI and screen-reader plumbing are handled here.
+/// window, GPU, input, touch, clipboard, HiDPI and screen-reader plumbing are handled here, on
+/// the desktop, on Android and in the browser.
 ///
 ///     try weeoui_sdl3.run(init.gpa, init.io, .{ .title = "Counter" }, &count, struct {
 ///         fn frame(count: *u32, ctx: *ui.Context) !void {
@@ -32,7 +34,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anyty
     const Painter = @import("weeoui_vitellus").Painter;
     try sdl3.init(.{ .video = true });
     defer sdl3.quit(.{ .video = true });
-    var window = vitellus_window.Sdl3Window.init(try sdl3.video.Window.init(options.title, options.width, options.height, .{ .vulkan = true, .resizable = true, .high_pixel_density = true }));
+    var window = vitellus_window.Sdl3Window.init(try sdl3.video.Window.init(options.title, options.width, options.height, .{ .vulkan = !web, .resizable = true, .high_pixel_density = true }));
     defer window.deinit();
     var ctx = try ui.Context.init(gpa);
     defer ctx.deinit();
@@ -43,6 +45,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anyty
         if (options.emoji) if (sdl3.c.SDL_GetAndroidJNIEnv()) |env| {
             ctx.font.platform = @import("android_text.zig").renderer(env);
         };
+    } else if (web) {
+        // A page can't read the system's emoji font; the browser draws them for us.
+        if (options.emoji) ctx.font.platform = ui.web.textRenderer();
     } else if (options.emoji) _ = ctx.font.loadSystemEmoji(io);
     // Built while the window has a surface and dropped while backgrounded: Android destroys the
     // surface when the app leaves the screen, and hands out a new one when it returns.
@@ -51,8 +56,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anyty
     var background = false;
     var text_input = false;
     var scale: f32 = 1; // UI units per window point
-    const start = std.Io.Timestamp.now(io, .awake);
+    // `io` can't time anything in the browser (it is `std.Io.failing` there), so SDL keeps time.
+    const start = sdl3.timer.getMillisecondsSinceInit();
+    // A finger lifted: once the frame has seen the tap, nothing should stay hovered under it.
+    var finger_lifted = false;
     while (true) {
+        // The browser owns the frame loop: hand it control until its next display frame.
+        if (web) ui.web.nextFrame();
         if (background) try sdl3.events.wait(); // nothing to draw; sleep until something happens
         while (sdl3.events.poll()) |event| switch (event) {
             .quit, .window_close_requested, .terminating => return,
@@ -65,7 +75,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anyty
                 painter = null;
             },
             .did_enter_foreground => background = false,
-            else => handleScaledEvent(&ctx, event, scale),
+            else => {
+                handleScaledEvent(&ctx, event, scale);
+                if (event == .mouse_button_up and fromTouch(event)) finger_lifted = true;
+            },
         };
         if (background) continue;
         const logical = try window.window.getSize();
@@ -88,9 +101,14 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anyty
             painter = try Painter.init(gpa, try window.asWindow(), pixels, &ctx.font);
             ctx.srgb_target = painter.?.srgb();
         }
-        ctx.time_ms = @intCast(@max(0, start.untilNow(io, .awake).toMilliseconds()));
+        ctx.time_ms = sdl3.timer.getMillisecondsSinceInit() - start;
         try frame(state, &ctx);
         try painter.?.paint(pixels, &ctx.font, try ctx.render(), viewport, ctx.theme.background);
+        // No stuck tooltips or hover colors where a finger was.
+        if (finger_lifted) ctx.handle(.{ .pointer_move = Vec2.init(-1, -1) });
+        finger_lifted = false;
+        syncClipboard(&ctx, window.window);
+        if (web) syncWebKeyboard(&ctx, scale);
         // Text events (and Android's on-screen keyboard) only while a text field has focus.
         if (ctx.wants_text != text_input) {
             text_input = ctx.wants_text;
@@ -100,10 +118,65 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anyty
     }
 }
 
-/// `std_options` for apps: on Android, where stderr goes nowhere, logs go to logcat.
-///
-///     pub const std_options = weeoui_sdl3.std_options;
-pub const std_options: std.Options = if (builtin.abi.isAndroid()) .{ .logFn = logcat } else .{};
+/// Copy what a field cut or copied to the system clipboard, and answer a paste with its text.
+fn syncClipboard(ctx: *ui.Context, window: sdl3.video.Window) void {
+    _ = window;
+    if (ctx.copied) |text| {
+        if (web) ui.web.copy(text) else {
+            const z = ctx.gpa.dupeZ(u8, text) catch return;
+            defer ctx.gpa.free(z);
+            sdl3.clipboard.setText(z) catch {};
+        }
+    }
+    if (ctx.paste_requested) {
+        ctx.paste_requested = false;
+        // SDL's clipboard is the page's own in the browser; ask the browser's (it answers later).
+        if (web) ui.web.requestPaste() else if (sdl3.clipboard.hasText()) {
+            const text = sdl3.clipboard.getText() catch return;
+            defer sdl3.free(text);
+            ctx.handle(.{ .text = text });
+        }
+    }
+    if (web) {
+        var buffer: [4096]u8 = undefined;
+        if (ui.web.takePaste(&buffer)) |text| ctx.handle(.{ .text = text });
+    }
+}
+
+/// The phone keyboard in the browser: open it over this frame's text fields, and feed what is
+/// typed on it to the UI.
+fn syncWebKeyboard(ctx: *ui.Context, scale: f32) void {
+    var fields: [64]ui.Rect = undefined;
+    const count = @min(ctx.text_fields.items.len, fields.len);
+    for (ctx.text_fields.items[0..count], fields[0..count]) |r, *out| out.* = .{ .x = r.x * scale, .y = r.y * scale, .w = r.w * scale, .h = r.h * scale };
+    ui.web.setTextFields(fields[0..count]);
+    ui.web.setKeyboard(ctx.wants_text);
+    var buffer: [256]u8 = undefined;
+    while (ui.web.nextKeyboardInput(&buffer)) |typed| switch (typed) {
+        .text => |text| ctx.handle(.{ .text = text }),
+        .key => |pressed| ctx.handle(.{ .key_down = .{ .key = pressed, .modifiers = .{}, .repeat = false } }),
+    };
+}
+
+/// Whether a mouse event really came from a finger (SDL turns touches into mouse events too).
+pub fn fromTouch(event: sdl3.events.Event) bool {
+    return switch (event) {
+        inline .mouse_motion, .mouse_button_down, .mouse_button_up => |e| e.id != null and e.id.?.value == sdl3.mouse.Id.touch.value,
+        else => false,
+    };
+}
+
+/// `std_options` for the platform: logcat on Android (stderr goes nowhere there), the browser
+/// console on the web (Zig 0.16 can't build its stderr logger for it). `weeoui.addApp` sets it.
+pub const std_options: std.Options = if (builtin.abi.isAndroid()) .{ .logFn = logcat } else if (web) .{ .logFn = ui.web.log } else .{};
+
+/// Panic handler for the platform: in the browser it reports to the console. `weeoui.addApp` sets it.
+pub const panic = if (web) std.debug.FullPanic(webPanic) else std.debug.FullPanic(std.debug.defaultPanic);
+
+fn webPanic(message: []const u8, _: ?usize) noreturn {
+    std.log.err("panic: {s}", .{message});
+    @trap();
+}
 
 fn logcat(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
     const android_log = struct {
@@ -123,27 +196,39 @@ fn logcat(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptim
     _ = android_log.__android_log_write(priority, if (scope == .default) "weeoui" else @tagName(scope), text);
 }
 
-/// On Android, SDLActivity loads the app as `libmain.so` and calls `SDL_main` instead of `main`.
-/// This exports it, calling `start` with the allocator and `Io` `std.process.Init` would give:
-///
-///     comptime { weeoui_sdl3.exportAndroidMain(start); }
-pub fn exportAndroidMain(comptime start: fn (std.mem.Allocator, std.Io) anyerror!void) void {
-    if (!builtin.abi.isAndroid()) return;
+/// Start `main` (your `pub fn main(init: std.process.Init) !void`) where the platform starts
+/// programs that aren't plain executables: `SDL_main` in Android's `libmain.so` (SDLActivity calls
+/// it), and C `main` in the browser. Elsewhere Zig's start code calls `main` and this does
+/// nothing. `weeoui.addApp` calls it for you.
+pub fn exportMain(comptime main: anytype) void {
+    if (!builtin.abi.isAndroid() and !web) return;
     const entry = struct {
-        fn sdlMain(_: c_int, _: [*c][*c]u8) callconv(.c) c_int {
-            var debug: std.heap.DebugAllocator(.{}) = .init;
-            defer _ = debug.deinit();
-            const gpa = if (builtin.mode == .Debug) debug.allocator() else std.heap.smp_allocator;
-            var threaded: std.Io.Threaded = .init(gpa, .{});
-            defer threaded.deinit();
-            start(gpa, threaded.io()) catch |err| {
+        fn start(argc: c_int, argv: [*c][*c]u8) callconv(.c) c_int {
+            const gpa = std.heap.c_allocator;
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            const args: []const [*:0]const u8 = @as([*]const [*:0]const u8, @ptrCast(argv))[0..@intCast(argc)];
+            const environ: std.process.Environ.Block = .{ .slice = &[_:null]?[*:0]const u8{} };
+            var environ_map = std.process.Environ.createMap(.{ .block = environ }, gpa) catch return 1;
+            defer environ_map.deinit();
+            // Zig 0.16 can't build threaded I/O for the browser.
+            var threaded: if (web) void else std.Io.Threaded = if (web) {} else .init(gpa, .{});
+            defer if (!web) threaded.deinit();
+            main(.{
+                .minimal = .{ .args = .{ .vector = args }, .environ = .{ .block = environ } },
+                .arena = &arena,
+                .gpa = gpa,
+                .io = if (web) std.Io.failing else threaded.io(),
+                .environ_map = &environ_map,
+                .preopens = std.process.Preopens.empty,
+            }) catch |err| {
                 std.log.err("app exited: {s}", .{@errorName(err)});
                 return 1;
             };
             return 0;
         }
     };
-    @export(&entry.sdlMain, .{ .name = "SDL_main" });
+    @export(&entry.start, .{ .name = if (web) "main" else "SDL_main" });
 }
 
 fn pixelSize(window: sdl3.video.Window) !@import("vitellus").Extent2D {

@@ -50,7 +50,10 @@ pub fn build(b: *std.Build) void {
     // Opt-in so consumers without SDL never fetch it.
     var sdl3_dep: ?*std.Build.Dependency = null;
     var adapter: ?*std.Build.Module = null;
-    if (b.option(bool, "sdl3", "Provide the weeoui_sdl3 input adapter module") orelse false) {
+    // On by default when building Weeoui itself (so `zig build counter` just works); opt-in for
+    // projects that depend on it, so ones without SDL never fetch it. `addApp` turns both on.
+    const root_project = b.pkg_hash.len == 0;
+    if (b.option(bool, "sdl3", "Provide the weeoui_sdl3 input adapter module") orelse root_project) {
         const sdl3_lazy = if (emscripten) |em|
             b.lazyDependency("sdl3", .{ .target = target, .optimize = optimize, .sdl_system_include_path = em.include })
         else
@@ -71,7 +74,7 @@ pub fn build(b: *std.Build) void {
     // `src/vitellus.zig` with their own `vitellus` import to avoid a second copy.
     var vitellus_dep: ?*std.Build.Dependency = null;
     var renderer: ?*std.Build.Module = null;
-    if (b.option(bool, "vitellus", "Provide the weeoui_vitellus renderer module") orelse false) {
+    if (b.option(bool, "vitellus", "Provide the weeoui_vitellus renderer module") orelse root_project) {
         if (b.lazyDependency("vitellus", .{ .target = target, .optimize = optimize })) |vitellus| {
             vitellus_dep = vitellus;
             renderer = b.addModule("weeoui_vitellus", .{
@@ -87,7 +90,7 @@ pub fn build(b: *std.Build) void {
     // Both backends: `weeoui_sdl3.run` opens a window and draws with `weeoui_vitellus.Painter`.
     if (sdl3_dep != null and vitellus_dep != null) {
         const vitellus_module = vitellus_dep.?.module("vitellus");
-        const sdl_window = b.createModule(.{
+        const sdl_window = b.addModule("vitellus_sdl3", .{
             .root_source_file = vitellus_dep.?.path("src/windowing/sdl3.zig"),
             .target = target,
             .optimize = optimize,
@@ -96,79 +99,152 @@ pub fn build(b: *std.Build) void {
         adapter.?.addImport("vitellus", vitellus_module);
         adapter.?.addImport("vitellus_sdl3", sdl_window);
         adapter.?.addImport("weeoui_vitellus", renderer.?);
-        // `zig build counter|demo -Dsdl3 -Dvitellus`: the README quick start and the component
-        // gallery. With an Android `-Dtarget` they build, install and launch APKs instead.
-        const gallery = b.createModule(.{
+        if (!root_project) return;
+        // The examples, built like any Weeoui app: `zig build counter|demo|gallery`, with
+        // `-Dtarget=wasm32-emscripten` for the browser or `-Dtarget=aarch64-linux-android.35` for an APK.
+        const parts = Parts.of(b, target, optimize).?;
+        buildApp(b, parts, .{ .name = "counter", .root_source_file = b.path("examples/counter.zig"), .step = "counter" });
+        buildApp(b, parts, .{ .name = "demo", .root_source_file = b.path("examples/demo.zig"), .step = "demo" });
+        // ponytail: no Android gallery; its SDL main callbacks need SDL_main.h, which Vitellus's
+        // Android SDL build leaves out. `run` apps start through `exportMain` there instead.
+        if (!target.result.abi.isAndroid()) buildApp(b, parts, .{
+            .name = "gallery",
             .root_source_file = b.path("examples/gallery/main.zig"),
+            .step = "gallery",
+            // Docking and DevTools sit below `Context`, so the gallery runs its own SDL main callbacks.
+            .own_entry = true,
+            .imports = &.{ .{ .name = "weeoui_vitellus", .module = renderer.? }, .{ .name = "vitellus", .module = vitellus_module }, .{ .name = "vitellus_sdl3", .module = sdl_window } },
+        });
+        if (target.result.os.tag == .emscripten or target.result.abi.isAndroid()) return;
+        for ([_][]const u8{ "examples/demo.zig", "examples/gallery/demo.zig" }) |file| {
+            const tested = b.createModule(.{ .root_source_file = b.path(file), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "weeoui", .module = mod }, .{ .name = "weeoui_sdl3", .module = adapter.? } }, .link_libc = true });
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tested, .use_llvm = true })).step);
+        }
+    }
+}
+
+pub const AppOptions = struct {
+    name: []const u8,
+    /// Your app: a `pub fn main(init: std.process.Init) !void` that calls `weeoui_sdl3.run`.
+    /// Nothing else is needed: logging, panics and each platform's entry point are set up for you.
+    root_source_file: std.Build.LazyPath,
+    /// Defaults to `-Dtarget` and `-Doptimize`. Pass them when building several apps.
+    target: ?std.Build.ResolvedTarget = null,
+    optimize: ?std.builtin.OptimizeMode = null,
+    /// The `zig build` step that runs the app.
+    step: []const u8 = "run",
+    /// Other modules your app imports.
+    imports: []const std.Build.Module.Import = &.{},
+    /// Your file is the program's root and starts itself (SDL's main callbacks, say) instead of
+    /// having a `main` for Weeoui to wrap.
+    own_entry: bool = false,
+};
+
+/// Build a Weeoui app for wherever `-Dtarget` points: a desktop program, a web page
+/// (`wasm32-emscripten`, into zig-out/web) or an Android APK. In your build.zig:
+///
+///     pub fn build(b: *std.Build) void {
+///         @import("weeoui").addApp(b, .{ .name = "coop", .root_source_file = b.path("src/main.zig") });
+///     }
+///
+/// `zig build run` starts it: runs the program, opens the page in a browser, or installs and
+/// launches the APK with adb (needs `ANDROID_HOME`). The web needs emsdk (`$EMSDK` or ~/emsdk).
+pub fn addApp(b: *std.Build, options: AppOptions) void {
+    const target = options.target orelse b.standardTargetOptions(.{});
+    const optimize = options.optimize orelse b.standardOptimizeOption(.{});
+    const weeoui = b.dependency("weeoui", .{ .target = target, .optimize = optimize, .sdl3 = true, .vitellus = true });
+    var resolved = options;
+    resolved.target = target;
+    resolved.optimize = optimize;
+    // On a fresh checkout Weeoui's lazy dependencies (SDL, Vitellus) aren't fetched yet: Zig
+    // fetches them and runs this build again.
+    buildApp(b, Parts.of(weeoui.builder, target, optimize) orelse return, resolved);
+}
+
+/// What an app needs from Weeoui's own build (`weeoui` is Weeoui's builder, even when another
+/// project's build calls `addApp`).
+const Parts = struct {
+    weeoui: *std.Build,
+    ui: *std.Build.Module,
+    sdl3: *std.Build.Module,
+    vitellus: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+
+    fn of(weeoui: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) ?Parts {
+        return .{
+            .weeoui = weeoui,
+            .ui = weeoui.modules.get("weeoui").?,
+            .sdl3 = weeoui.modules.get("weeoui_sdl3") orelse return null,
+            // The same arguments Weeoui's build used, so this is that dependency again.
+            .vitellus = weeoui.lazyDependency("vitellus", .{ .target = target, .optimize = optimize }) orelse return null,
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "weeoui", .module = mod },
-                .{ .name = "weeoui_sdl3", .module = adapter.? },
-                .{ .name = "weeoui_vitellus", .module = renderer.? },
-                .{ .name = "vitellus", .module = vitellus_module },
-                .{ .name = "vitellus_sdl3", .module = sdl_window },
-            },
-        });
-        const gallery_step = b.step("gallery", "Run the full component gallery: docking, DevTools and every widget");
-        if (emscripten) |em| {
-            // `zig build gallery -Dsdl3 -Dvitellus -Dtarget=wasm32-emscripten`: zig-out/web/gallery.html.
-            const app = em.addApp(b, .{
-                .name = "gallery",
-                .root_module = gallery,
-                .shell_file = b.path("examples/gallery/shell.html"),
-                // The font atlases and the gallery's Debug frames outgrow Vitellus's 1 MiB stack.
-                .args = &.{ "-sSTACK_SIZE=8388608", "--js-library", b.pathFromRoot("src/web.js") },
-            });
-            gallery_step.dependOn(&app.run.step);
-            return;
-        }
-        addDesktopExample(b, gallery_step, "gallery", gallery);
-        const gallery_tests = b.createModule(.{ .root_source_file = b.path("examples/gallery/demo.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "weeoui", .module = mod }} });
-        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gallery_tests, .use_llvm = true })).step);
-        const apps = [_]App{
-            .{ .name = "counter", .module = example(b, "counter", mod, adapter.?), .step = b.step("counter", "Run the counter example") },
-            .{ .name = "demo", .module = example(b, "demo", mod, adapter.?), .step = b.step("demo", "Run the component gallery") },
         };
-        if (target.result.abi.isAndroid()) {
-            addAndroidApps(b, &apps, vitellus_dep.?, sdl3_dep.?.module("sdl3"));
-        } else {
-            for (apps) |app| addDesktopExample(b, app.step, app.name, app.module);
-            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = apps[1].module, .use_llvm = true })).step);
-        }
     }
-}
+};
 
-fn example(b: *std.Build, name: []const u8, weeoui: *std.Build.Module, sdl3: *std.Build.Module) *std.Build.Module {
-    return b.createModule(.{
-        .root_source_file = b.path(b.fmt("examples/{s}.zig", .{name})),
-        .target = weeoui.resolved_target,
-        .optimize = weeoui.optimize,
+fn buildApp(b: *std.Build, parts: Parts, options: AppOptions) void {
+    const target = options.target orelse parts.target;
+    const optimize = options.optimize orelse parts.optimize;
+    const app = b.createModule(.{ .root_source_file = options.root_source_file, .target = target, .optimize = optimize, .link_libc = true });
+    app.addImport("weeoui", parts.ui);
+    app.addImport("weeoui_sdl3", parts.sdl3);
+    for (options.imports) |import| app.addImport(import.name, import.module);
+    const root = if (options.own_entry) app else b.createModule(.{
+        // In the browser Zig's start code would wrap a root `main` with threaded I/O, which can't
+        // build there; `exportMain` starts it instead.
+        .root_source_file = b.addWriteFiles().add("main.zig", if (target.result.os.tag == .emscripten) entry_source else entry_source ++ "pub const main = app.main;\n"),
+        .target = target,
+        .optimize = optimize,
         .link_libc = true,
-        .imports = &.{
-            .{ .name = "weeoui", .module = weeoui },
-            .{ .name = "weeoui_sdl3", .module = sdl3 },
-        },
+        .imports = &.{ .{ .name = "app", .module = app }, .{ .name = "weeoui_sdl3", .module = parts.sdl3 } },
     });
+    const step = b.step(options.step, b.fmt("Run {s}", .{options.name}));
+    const wb = parts.weeoui;
+    if (target.result.os.tag == .emscripten) {
+        const vitellus_build = wb.lazyImport(@This(), "vitellus") orelse return;
+        const page = vitellus_build.Emscripten.init(b, target, null).addApp(b, .{
+            .name = options.name,
+            .root_module = root,
+            .shell_file = wb.path("src/shell.html"),
+            // The font atlases and Debug frames outgrow Vitellus's 1 MiB stack; web.js is `ui.web`.
+            .args = &.{ "-sSTACK_SIZE=8388608", "--js-library", wb.pathFromRoot("src/web.js") },
+        });
+        step.dependOn(&page.run.step);
+    } else if (target.result.abi.isAndroid()) {
+        addAndroidApp(b, parts, options.name, root, step);
+    } else {
+        const exe = b.addExecutable(.{ .name = options.name, .root_module = root, .use_llvm = true });
+        const install = b.addInstallArtifact(exe, .{});
+        b.getInstallStep().dependOn(&install.step);
+        // Run the installed copy, so Windows finds accesskit.dll beside it.
+        const run = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
+        run.step.dependOn(&install.step);
+        if (wb.named_lazy_paths.get("accesskit_dll")) |dll| {
+            const install_dll = b.addInstallBinFile(dll, "accesskit.dll");
+            b.getInstallStep().dependOn(&install_dll.step);
+            run.step.dependOn(&install_dll.step);
+        }
+        if (b.args) |args| run.addArgs(args);
+        step.dependOn(&run.step);
+    }
 }
 
-/// Install `name` with `zig build` (so `-Dtarget=x86_64-windows` cross-builds land in zig-out/bin)
-/// and run the installed copy from `step`, so Windows finds accesskit.dll beside it.
-fn addDesktopExample(b: *std.Build, step: *std.Build.Step, name: []const u8, root_module: *std.Build.Module) void {
-    const exe = b.addExecutable(.{ .name = name, .root_module = root_module, .use_llvm = true });
-    const install = b.addInstallArtifact(exe, .{});
-    b.getInstallStep().dependOn(&install.step);
-    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
-    run.step.dependOn(&install.step);
-    if (b.named_lazy_paths.get("accesskit_dll")) |dll| {
-        const install_dll = b.addInstallBinFile(dll, "accesskit.dll");
-        b.getInstallStep().dependOn(&install_dll.step);
-        run.step.dependOn(&install_dll.step);
-    }
-    if (b.args) |args| run.addArgs(args);
-    step.dependOn(&run.step);
-}
+/// The root `addApp` puts around an app's `main`.
+const entry_source =
+    \\//! Generated by `weeoui.addApp`: starts the app's `main` on every platform.
+    \\const std = @import("std");
+    \\const app = @import("app");
+    \\const weeoui_sdl3 = @import("weeoui_sdl3");
+    \\
+    \\pub const std_options: std.Options = if (@hasDecl(app, "std_options")) app.std_options else weeoui_sdl3.std_options;
+    \\pub const panic = if (@hasDecl(app, "panic")) app.panic else weeoui_sdl3.panic;
+    \\comptime {
+    \\    weeoui_sdl3.exportMain(app.main);
+    \\}
+    \\
+;
 
 /// Android links everything into one shared `libmain.so`, so static libraries need PIC.
 fn makePic(compile: *std.Build.Step.Compile) void {
@@ -176,62 +252,64 @@ fn makePic(compile: *std.Build.Step.Compile) void {
     for (compile.root_module.link_objects.items) |object| if (object == .other_step) makePic(object.other_step);
 }
 
-const App = struct { name: []const u8, module: *std.Build.Module, step: *std.Build.Step };
-
-/// `zig build <app> -Dsdl3 -Dvitellus -Dtarget=aarch64-linux-android.35`: package each app as an
-/// APK (`zig-out/bin/<app>.apk`, package `com.eggyengine.weeoui.<app>`), then install and start
-/// it with adb. Needs `ANDROID_HOME`.
-fn addAndroidApps(b: *std.Build, apps: []const App, vitellus: *std.Build.Dependency, sdl3: *std.Build.Module) void {
-    const android = b.lazyImport(@This(), "android") orelse return;
-    const vitellus_build = b.lazyImport(@This(), "vitellus") orelse return;
+/// Package the app as an APK (`zig-out/bin/<name>.apk`, package `com.eggyengine.weeoui.<name>`),
+/// then install and start it with adb from `step`. Needs `ANDROID_HOME`.
+fn addAndroidApp(b: *std.Build, parts: Parts, name: []const u8, root: *std.Build.Module, step: *std.Build.Step) void {
+    const wb = parts.weeoui;
+    const android = wb.lazyImport(@This(), "android") orelse return;
+    const vitellus_build = wb.lazyImport(@This(), "vitellus") orelse return;
     const sdk = android.Sdk.create(b, .{});
-    // SDLActivity loads `libmain.so` and calls its exported `SDL_main` (see `weeoui_sdl3.exportAndroidMain`).
-    const libs = b.allocator.alloc(*std.Build.Step.Compile, apps.len) catch @panic("OOM");
-    for (apps, libs) |app, *lib| lib.* = b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = app.module, .use_llvm = true });
-    // zig-sdl3's SDL has no Android backend; Vitellus rebuilds it once, with its Android patch, for every app.
-    const sdl = vitellus_build.androidSdl(b, vitellus, sdl3, libs);
-    for (apps, libs, 0..) |app, lib, i| {
-        const apk = sdk.createApk(.{
-            .name = app.name,
-            .api_level = .android15,
-            .build_tools_version = "36.0.0",
-            .ndk_version = "27.1.12297006",
-        });
-        apk.setKeyStore(sdk.createKeyStore(.example));
-        apk.setAndroidManifest(b.addWriteFiles().add("AndroidManifest.xml", b.fmt(android_manifest, .{ app.name, app.name })));
-        apk.addJavaSourceFiles(.{
-            .root = b.path("examples/android/java"),
-            .files = &.{
-                "org/libsdl/app/SDL.java",
-                "org/libsdl/app/SDLActivity.java",
-                "org/libsdl/app/SDLAudioManager.java",
-                "org/libsdl/app/SDLControllerManager.java",
-                "org/libsdl/app/SDLDummyEdit.java",
-                "org/libsdl/app/SDLInputConnection.java",
-                "org/libsdl/app/SDLSurface.java",
-                "org/libsdl/app/HIDDevice.java",
-                "org/libsdl/app/HIDDeviceManager.java",
-                "org/libsdl/app/HIDDeviceUSB.java",
-                "org/libsdl/app/HIDDeviceBLESteamController.java",
-            },
-        });
-        apk.addLibraryFile(switch (app.module.resolved_target.?.result.cpu.arch) {
-            .aarch64 => .arm64_v8a,
-            .arm => .armeabi_v7a,
-            .x86_64 => .x86_64,
-            .x86 => .x86,
-            else => @panic("unsupported Android architecture"),
-        }, sdl.library);
-        apk.addArtifact(lib);
-        const installed = apk.addInstallApk();
-        if (i == 0) sdl.setLibC(lib.libc_file.?);
-        b.getInstallStep().dependOn(&installed.step);
-        const install = sdk.addAdbInstall(installed.source);
-        const start = sdk.addAdbStart(b.fmt("com.eggyengine.weeoui.{s}/org.libsdl.app.SDLActivity", .{app.name}));
-        start.step.dependOn(&install.step);
-        app.step.dependOn(&start.step);
-    }
+    // SDLActivity loads `libmain.so` and calls its exported `SDL_main` (`weeoui_sdl3.exportMain`).
+    const lib = b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = root, .use_llvm = true });
+    // zig-sdl3's SDL has no Android backend; Vitellus rebuilds it with its Android patch. That
+    // swaps the library inside the sdl3 module, so it happens once and later apps share it.
+    const first = android_sdl == null;
+    if (first) {
+        const sdl = vitellus_build.androidSdl(b, parts.vitellus, parts.sdl3.import_table.get("sdl3").?, &.{lib});
+        android_sdl = .{ .library = sdl.library, .run = sdl.run, .lib = lib };
+    } else lib.step.dependOn(&android_sdl.?.lib.step);
+    const apk = sdk.createApk(.{
+        .name = name,
+        .api_level = .android15,
+        .build_tools_version = "36.0.0",
+        .ndk_version = "27.1.12297006",
+    });
+    apk.setKeyStore(sdk.createKeyStore(.example));
+    apk.setAndroidManifest(b.addWriteFiles().add("AndroidManifest.xml", b.fmt(android_manifest, .{ name, name })));
+    apk.addJavaSourceFiles(.{
+        .root = wb.path("examples/android/java"),
+        .files = &.{
+            "org/libsdl/app/SDL.java",
+            "org/libsdl/app/SDLActivity.java",
+            "org/libsdl/app/SDLAudioManager.java",
+            "org/libsdl/app/SDLControllerManager.java",
+            "org/libsdl/app/SDLDummyEdit.java",
+            "org/libsdl/app/SDLInputConnection.java",
+            "org/libsdl/app/SDLSurface.java",
+            "org/libsdl/app/HIDDevice.java",
+            "org/libsdl/app/HIDDeviceManager.java",
+            "org/libsdl/app/HIDDeviceUSB.java",
+            "org/libsdl/app/HIDDeviceBLESteamController.java",
+        },
+    });
+    apk.addLibraryFile(switch (root.resolved_target.?.result.cpu.arch) {
+        .aarch64 => .arm64_v8a,
+        .arm => .armeabi_v7a,
+        .x86_64 => .x86_64,
+        .x86 => .x86,
+        else => @panic("unsupported Android architecture"),
+    }, android_sdl.?.library);
+    apk.addArtifact(lib);
+    const installed = apk.addInstallApk();
+    // The patched SDL builds against the NDK libc zig-android-sdk set on the first app.
+    if (first) android_sdl.?.run.addFileArg(lib.libc_file.?);
+    b.getInstallStep().dependOn(&installed.step);
+    const install = sdk.addAdbInstall(installed.source);
+    const start = sdk.addAdbStart(b.fmt("com.eggyengine.weeoui.{s}/org.libsdl.app.SDLActivity", .{name}));
+    start.step.dependOn(&install.step);
+    step.dependOn(&start.step);
 }
+var android_sdl: ?struct { library: std.Build.LazyPath, run: *std.Build.Step.Run, lib: *std.Build.Step.Compile } = null;
 
 const android_manifest =
     \\<?xml version="1.0" encoding="utf-8"?>
