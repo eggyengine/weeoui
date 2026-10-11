@@ -361,9 +361,10 @@ pub fn translate(event: sdl3.events.Event) ?ui.input.Event {
     };
 }
 
-/// Shift turns a vertical wheel into horizontal scrolling, for mice without a tilt wheel.
+/// Shift turns a vertical wheel into horizontal scrolling, for mice without a tilt wheel:
+/// wheel down scrolls right.
 fn wheelDelta(x: f32, y: f32, shift: bool) Vec2 {
-    return if (shift and x == 0) Vec2.init(y, 0) else Vec2.init(x, y);
+    return if (shift and x == 0) Vec2.init(-y, 0) else Vec2.init(x, y);
 }
 
 fn button(value: sdl3.mouse.Button) ?ui.input.Button {
@@ -396,7 +397,7 @@ test "SDL events become Weeoui input" {
     try std.testing.expectEqual(@as(f32, 20), down.pointer_down.position.y);
     try std.testing.expectEqual(ui.input.Key.enter, key(.kp_enter).?);
     try std.testing.expectEqual(ui.input.Key.page_down, key(.page_down).?);
-    try std.testing.expectEqual(Vec2.init(-2, 0), wheelDelta(0, -2, true));
+    try std.testing.expectEqual(Vec2.init(2, 0), wheelDelta(0, -2, true));
     try std.testing.expectEqual(Vec2.init(1, -2), wheelDelta(1, -2, true));
     std.testing.refAllDecls(@This());
 }

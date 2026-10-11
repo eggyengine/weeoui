@@ -35,7 +35,8 @@ pub const ScrollState = struct {
     }
     pub fn wheel(self: *ScrollState, dx: f32, dy: f32) void {
         if (self.message_mode and dy > 0) self.following_messages = false;
-        self.offset.x -= dx * 40;
+        // `dx` is positive to the right (SDL's convention), `dy` positive up.
+        self.offset.x += dx * 40;
         self.offset.y -= dy * 40;
         self.clamp();
         self.recent = recent_seconds;
@@ -223,4 +224,15 @@ test "scrollbar thumb drags through content range" {
     try std.testing.expect(scroll.offset.y <= 200);
     scroll.pointerUp();
     try std.testing.expect(scroll.dragging == .none);
+}
+
+test "a wheel to the right scrolls wide content to the right, and down scrolls down" {
+    var state = ScrollState{};
+    state.updateLayout(.{ .x = 0, .y = 0, .w = 100, .h = 100 }, Vec2.init(400, 400));
+    state.wheel(1, 0);
+    try std.testing.expectEqual(@as(f32, 40), state.offset.x);
+    state.wheel(0, -1);
+    try std.testing.expectEqual(@as(f32, 40), state.offset.y);
+    state.wheel(-1, 0);
+    try std.testing.expectEqual(@as(f32, 0), state.offset.x);
 }
