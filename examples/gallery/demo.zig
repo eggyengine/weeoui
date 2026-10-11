@@ -1091,6 +1091,16 @@ pub const Demo = struct {
             self.selecting_text = true;
         }
     }
+    /// Middle click: closes a dock tab.
+    pub fn pointerMiddleDown(self: *Demo, x: f32, y: f32) void {
+        var i = self.control_count;
+        while (i > 0) {
+            i -= 1;
+            if (!self.control_clips[i].contains(x, y)) continue;
+            if (self.dock.closeTab(self.control_ids[i])) self.focus = 0;
+            return;
+        }
+    }
     pub fn pointerContextDown(self: *Demo, x: f32, y: f32) void {
         if (self.dialog_open) return;
         // A text field, or highlighted text, opens the text menu.

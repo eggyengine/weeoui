@@ -19,7 +19,7 @@ Both of these work on the element tree from `ui.Layout` (built with a `Layout.Bu
 - **Drag to rearrange.** Dragging a tab shows a compass over the stack under the pointer. Dropping on the centre adds it as a tab, and dropping on an edge splits that side. Dropping on a tab bar puts the tab between the tabs under the pointer, so tabs reorder within a stack too.
 - **Floating windows.** A panel can float inside the main window, with its own title bar buttons to close, minimise (fold to the tab bar) and maximise (fill the window).
 - **Pop out to OS windows.** A panel can move into its own operating-system window and later dock back. If your app can't open extra windows, set `os_windows = false` and pop-outs float instead.
-- **Tab menu.** Every stack has a menu with pop out, float, dock back and close. A closed panel comes back with `add`; the gallery lists every panel in its Windows menu.
+- **Tab menu.** Every stack has a menu with pop out, float, dock back and close. Middle-clicking a tab closes it too (`closeTab`). A closed panel comes back with `add`; the gallery lists every panel in its Windows menu.
 - **Native-looking buttons.** Floating windows order and style their buttons from `buttons`. Use `weeoui_sdl3.buttonLayout` to read the desktop's layout.
 - **Accessibility.** Splitters are announced as sliders, and tabs and buttons are focusable.
 
@@ -96,6 +96,7 @@ Every id the dock creates lies at or above `ui.dock.first_id`. Your hit testing 
 | Event | Call |
 | --- | --- |
 | Pointer pressed on an id | `dock.press(id, x, y)`. Returns `true` if the dock handled it. |
+| Middle button pressed on an id | `dock.closeTab(id)`. Returns `true` if it was a tab, and closes its panel. |
 | Pointer moved while `dock.dragging()` | `dock.dragTo(x, y)` |
 | Pointer released while dragging | `dock.release(x, y)` |
 | Enter or Space on a focused id | `dock.activate(id)`. Returns `true` if handled. |

@@ -226,7 +226,7 @@ const App = struct {
                 switch (button.button) {
                     .left => demo.pointerDownWithClicks(button.position.x / scale, button.position.y / scale, font, button.clicks),
                     .right => demo.pointerContextDown(button.position.x / scale, button.position.y / scale),
-                    else => {},
+                    .middle => demo.pointerMiddleDown(button.position.x / scale, button.position.y / scale),
                 }
                 self.layout_dirty = true;
             },
