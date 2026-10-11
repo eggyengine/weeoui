@@ -458,7 +458,8 @@ pub const DockSpace = struct {
                 switch ((id - menu_item_first) % 4) {
                     0 => self.detach(panel) catch {},
                     1 => self.float(panel, self.floatRect(panel, node.rect.x + 40, node.rect.y + 40)) catch {},
-                    else => self.redock(self.hostOf(index)),
+                    2 => self.redock(self.hostOf(index)),
+                    else => self.remove(panel),
                 }
             },
             window_button_first...window_button_first + max_floating * 3 - 1 => {
@@ -693,7 +694,7 @@ pub const DockSpace = struct {
             burger.accessibility = .{ .role = .button, .label = "Panel menu", .expanded = self.menu == index };
             try tabs.append(b.allocator, burger);
             if (self.menu == index) {
-                var items: [3]@import("widgets.zig").MenuItem = undefined;
+                var items: [4]@import("widgets.zig").MenuItem = undefined;
                 var n: usize = 0;
                 if (host != .window and self.os_windows) {
                     items[n] = .{ .id = menu_item_first + @as(u32, index) * 4, .label = "Pop out into window" };
@@ -707,6 +708,9 @@ pub const DockSpace = struct {
                     items[n] = .{ .id = menu_item_first + @as(u32, index) * 4 + 2, .label = "Dock back" };
                     n += 1;
                 }
+                // Apps bring a closed panel back with `add` (the gallery's Windows menu).
+                items[n] = .{ .id = menu_item_first + @as(u32, index) * 4 + 3, .label = "Close" };
+                n += 1;
                 const menu = try @import("widgets.zig").menuItems(b, items[0..n], 0, 0);
                 menu.style.width = 200;
                 try tabs.append(b.allocator, @import("widgets.zig").anchorTo(menu, burger, .bottom, 700));
@@ -1043,4 +1047,16 @@ test "dropping a tab on a tab bar puts it between the tabs under the pointer" {
     dock.dragTo((spans[0][1] + spans[1][1]) / 2 - 10, 15);
     dock.release((spans[0][1] + spans[1][1]) / 2 - 10, 15);
     try std.testing.expectEqualSlices(u32, &.{ 2, 4, 3, 1 }, dock.nodes[dock.nodeOf(2).?].panels[0..4]);
+}
+
+test "the stack menu closes a panel, and add brings it back" {
+    var dock = DockSpace.init();
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .right);
+    const right = dock.nodeOf(2).?;
+    try std.testing.expect(dock.activate(menu_first + right));
+    try std.testing.expect(dock.activate(menu_item_first + @as(u32, right) * 4 + 3));
+    try std.testing.expect(dock.nodeOf(2) == null and dock.menu == none);
+    try dock.add(2, null, .center);
+    try std.testing.expect(dock.nodeOf(2) != null);
 }
