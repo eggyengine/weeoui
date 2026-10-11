@@ -25,6 +25,9 @@ const nav_first_id = 850;
 const menubar_popup_id = 890;
 const submenu_popup_id = 891;
 const nav_popup_id = 892;
+/// How far (layout units) a finger may travel and still tap, and how long a press holds.
+const swipe_threshold: f32 = 10;
+const long_press_seconds: f32 = 0.5;
 /// The right-click text menu: Cut, Copy, Paste, Select All.
 const text_menu_first = 895;
 const text_menu_popup_id = 899;
@@ -158,6 +161,21 @@ pub const Demo = struct {
     menu_highlight: u32 = 420,
     menu_open: bool = false,
     context_point: ?ui.Vec2 = null,
+    /// A finger on the screen until it lifts: a tap (acts on release), a swipe (pans the scroll
+    /// area under it, then glides) or a long press (the right-click menu).
+    touch: ?struct {
+        at: ui.Vec2,
+        last: ui.Vec2,
+        /// Seconds since it touched down, from `tickScroll`.
+        held: f32 = 0,
+        moved: bool = false,
+        long_pressed: bool = false,
+        pane: ?*L.ScrollState = null,
+        /// Where and when the swipe's speed was last measured.
+        sample: ui.Vec2,
+        sample_time: f32 = 0,
+        velocity: ui.Vec2 = .zero,
+    } = null,
     /// Where the text menu opened, and the field it edits (0: the highlighted static text).
     text_menu: ?ui.Vec2 = null,
     text_menu_field: u32 = 0,
@@ -593,6 +611,14 @@ pub const Demo = struct {
     }
     pub fn tickScroll(self: *Demo, dt: f32) void {
         for (self.panes()) |pane| pane.tick(dt);
+        self.scroll.tick(dt);
+        if (self.touch) |*t| {
+            t.held += dt;
+            if (!t.moved and !t.long_pressed and t.held >= long_press_seconds) {
+                t.long_pressed = true;
+                self.pointerContextDown(t.at.x, t.at.y);
+            }
+        }
         self.devtools.recordFrame(dt * 1000);
         if (self.held_id == 0) return;
         // Hold: first repeat after 0.4 s, then every 0.08 s.
@@ -1091,6 +1117,74 @@ pub const Demo = struct {
             self.selecting_text = true;
         }
     }
+    pub fn touchDown(self: *Demo, x: f32, y: f32, font: *const ui.Font) void {
+        // A new touch catches anything still gliding.
+        self.scroll.velocity = .zero;
+        for (self.panes()) |pane| pane.velocity = .zero;
+        if (self.followsFinger(x, y)) return self.pointerDownWithClicks(x, y, font, 1);
+        self.touch = .{ .at = .init(x, y), .last = .init(x, y), .sample = .init(x, y) };
+    }
+    pub fn touchMove(self: *Demo, x: f32, y: f32, font: *const ui.Font) void {
+        const t = &(self.touch orelse return self.pointerMoveAt(x, y, font));
+        const p = ui.Vec2.init(x, y);
+        if (!t.moved) {
+            if (@abs(x - t.at.x) + @abs(y - t.at.y) <= swipe_threshold) return;
+            // Travelled: it's a swipe now, not a tap.
+            t.moved = true;
+            t.pane = self.scrollableAt(t.at, if (@abs(x - t.at.x) > @abs(y - t.at.y)) .horizontal else .vertical);
+        }
+        if (t.pane) |pane| pane.pan(p.sub(t.last));
+        t.last = p;
+        if (t.held - t.sample_time >= 0.03) {
+            t.velocity = p.sub(t.sample).scale(1 / (t.held - t.sample_time));
+            t.sample = p;
+            t.sample_time = t.held;
+        }
+    }
+    pub fn touchUp(self: *Demo, font: *const ui.Font) void {
+        const t = self.touch orelse return self.pointerUp();
+        self.touch = null;
+        if (t.moved) {
+            // Still moving when it lifted: let the content glide on.
+            if (t.pane) |pane| if (t.held - t.sample_time < 0.1) pane.fling(t.velocity);
+        } else if (!t.long_pressed) {
+            self.pointerDownWithClicks(t.at.x, t.at.y, font, 1);
+            self.pointerUp();
+        }
+        // Nothing stays hovered where the finger was.
+        self.pointer_x = -1;
+        self.pointer_y = -1;
+    }
+    /// Controls a finger drags directly instead of scrolling past: sliders, the colour wheel, the
+    /// divider, and the dock's tabs and splitters.
+    fn followsFinger(self: *const Demo, x: f32, y: f32) bool {
+        var i = self.control_count;
+        while (i > 0) {
+            i -= 1;
+            if (!self.control_clips[i].contains(x, y)) continue;
+            const id = self.control_ids[i];
+            return switch (id) {
+                slider_id, color_first_id...color_first_id + 9, 480 => true,
+                else => ui.dock.owns(id),
+            };
+        }
+        return false;
+    }
+    /// The innermost scroll area at `p` with room to move along `axis`.
+    fn scrollableAt(self: *Demo, p: ui.Vec2, axis: L.ScrollState.Axis) ?*L.ScrollState {
+        var best: ?*L.ScrollState = null;
+        var area = std.math.inf(f32);
+        for (self.panes() ++ [_]*L.ScrollState{&self.scroll}) |state| {
+            const v = state.viewport;
+            if (!v.contains(p.x, p.y)) continue;
+            const room = if (axis == .horizontal) state.content.x - v.w else state.content.y - v.h;
+            if (room <= 0.5 or v.w * v.h >= area) continue;
+            best = state;
+            area = v.w * v.h;
+        }
+        return best;
+    }
+
     /// Middle click: closes a dock tab.
     pub fn pointerMiddleDown(self: *Demo, x: f32, y: f32) void {
         var i = self.control_count;
@@ -1806,7 +1900,12 @@ fn layoutMain(b: L.Builder, demo: *Demo, full: ui.Rect, count_buf: *[20]u8, font
     // DevTools property edits outlive the rebuild, like styles edited in a browser.
     if (demo.devtools.apply(page)) page.layout(area, font);
     demo.inspected = page;
-    if (!demo.docked) return page;
+    if (!demo.docked) {
+        const popup = try textMenu(b, demo) orelse return page;
+        const root = try b.node(0, .{ .width = full.w, .height = full.h }, .none, &.{ page, popup });
+        root.layout(full, font);
+        return root;
+    }
     var children: std.ArrayList(*L.Element) = .empty;
     if (demo.menubar_autohide) try children.append(b.allocator, page);
     if (!demo.menubar_autohide or demo.menubar_revealed) {
@@ -3364,4 +3463,44 @@ test "the Windows menu closes and reopens dock panels" {
         try demo.relayout(std.testing.allocator, viewport, &font);
         try std.testing.expectEqual(open, demo.dock.nodeOf(scene) != null);
     }
+}
+
+test "fingers tap on release, swipe to scroll and glide, and hold for the text menu" {
+    var font = try ui.Font.init(std.testing.allocator, ui.default_font);
+    defer font.deinit();
+    var demo: Demo = .{};
+    defer demo.deinit();
+    const phone = ui.Rect{ .x = 0, .y = 0, .w = 390, .h = 700 };
+    try demo.relayout(std.testing.allocator, phone, &font);
+    const button = demo.control_clips[demo.indexOf(button_id).?].center();
+    // A tap clicks once the finger lifts.
+    demo.touchDown(button.x, button.y, &font);
+    try std.testing.expectEqual(@as(u32, 0), demo.count);
+    demo.touchUp(&font);
+    try std.testing.expectEqual(@as(u32, 1), demo.count);
+    try demo.relayout(std.testing.allocator, phone, &font);
+    // A swipe starting on the same button scrolls the page instead, and keeps gliding.
+    demo.touchDown(button.x, button.y, &font);
+    var y = button.y;
+    for (0..6) |_| {
+        demo.tickScroll(1.0 / 60.0);
+        y -= 30;
+        demo.touchMove(button.x, y, &font);
+    }
+    demo.touchUp(&font);
+    try std.testing.expectEqual(@as(u32, 1), demo.count);
+    const lifted = demo.scroll.offset.y;
+    try std.testing.expect(lifted > 100);
+    demo.tickScroll(0.1);
+    try std.testing.expect(demo.scroll.offset.y > lifted);
+    // Holding on a text field opens its Cut/Copy/Paste menu.
+    demo.scroll.velocity = .zero;
+    demo.scroll.ensureVisible(demo.controls[demo.indexOf(300).?]);
+    try demo.relayout(std.testing.allocator, phone, &font);
+    const field = demo.control_clips[demo.indexOf(300).?].center();
+    demo.touchDown(field.x, field.y, &font);
+    demo.tickScroll(0.6);
+    try std.testing.expect(demo.text_menu != null);
+    demo.touchUp(&font);
+    try std.testing.expect(demo.text_menu != null); // lifting after the hold doesn't tap it away
 }

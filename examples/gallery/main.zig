@@ -110,6 +110,8 @@ const App = struct {
         const viewport = ui.Rect{ .x = 0, .y = 0, .w = @as(f32, @floatFromInt(logical.@"0")) / self.demo.ui_scale, .h = @as(f32, @floatFromInt(logical.@"1")) / self.demo.ui_scale };
         if (std.meta.eql(viewport, self.viewport)) return;
         self.viewport = viewport;
+        // Phones get the single-column gallery; panels need room.
+        self.demo.docked = viewport.w >= 720;
         self.font.dpi_scale = @as(f32, @floatFromInt(pixels.@"0")) / self.viewport.w;
         self.layout_dirty = true;
     }
@@ -214,7 +216,16 @@ const App = struct {
         const demo = self.demo;
         const font = &self.font;
         const scale = demo.ui_scale;
-        if (weeoui_sdl3.translate(curr_event)) |ui_event| switch (ui_event) {
+        // Fingers: tap on release, swipe to scroll, hold for the right-click menu.
+        if (weeoui_sdl3.fromTouch(curr_event)) {
+            switch (curr_event) {
+                .mouse_button_down => |e| demo.touchDown(e.x / scale, e.y / scale, font),
+                .mouse_motion => |e| demo.touchMove(e.x / scale, e.y / scale, font),
+                .mouse_button_up => demo.touchUp(font),
+                else => {},
+            }
+            self.layout_dirty = true;
+        } else if (weeoui_sdl3.translate(curr_event)) |ui_event| switch (ui_event) {
             .pointer_move => |p| {
                 // Moving the pointer only changes hit targets when it opens or closes a hover
                 // popup; laying out on every motion event is what made dragging lag.
