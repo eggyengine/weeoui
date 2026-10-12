@@ -175,7 +175,7 @@ const App = struct {
         try self.drawViewport(&canvas, try self.demo.draw(arena.allocator(), &canvas, self.viewport));
         self.layout_dirty = false;
         const rects = self.demo.frames[0];
-        self.frame.* = .{ .bar = rects.bar, .buttons = rects.buttons, .button_count = rects.count, .scale = 1 / self.demo.ui_scale };
+        self.frame.* = .{ .bar = rects.bar, .buttons = rects.buttons, .button_count = rects.count, .controls = rects.controls, .popup_open = self.demo.popupOpen(), .scale = 1 / self.demo.ui_scale };
         const flags = self.window.window.getFlags();
         self.demo.window_state[0] = .{ .maximized = flags.maximized, .focused = flags.input_focus };
         try self.painter.paint(extent, &self.font, self.vertices[0..canvas.len], self.viewport, t.background);

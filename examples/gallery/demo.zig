@@ -25,6 +25,8 @@ const nav_first_id = 850;
 const menubar_popup_id = 890;
 const submenu_popup_id = 891;
 const nav_popup_id = 892;
+/// A submenu inside a submenu: Share, when the menus are collapsed behind the hamburger.
+const nested_popup_id = 893;
 /// How far (layout units) a finger may travel and still tap, and how long a press holds.
 const swipe_threshold: f32 = 10;
 const long_press_seconds: f32 = 0.5;
@@ -104,6 +106,18 @@ const menubar_menus = [_]W.MenubarMenu{
 };
 /// Id of the last top-level menu (File is `menubar_first_id + 1`).
 const menubar_last = menubar_first_id + menubar_menus.len;
+/// The hamburger that stands in for the menus when the title bar is too narrow for them; its
+/// rows are the menus themselves, as submenus.
+const menubar_hamburger = menubar_first_id + 9;
+const share_id = menubar_first_id + 13;
+const menubar_collapsed_rows = blk: {
+    var rows: [menubar_menus.len]W.MenuItem = undefined;
+    for (&rows, menubar_menus) |*row, entry| row.* = .{ .id = entry.id, .label = entry.label, .kind = .submenu, .items = entry.items };
+    break :blk rows;
+};
+fn isMenubarTrigger(id: u32) bool {
+    return id >= menubar_first_id + 1 and id <= menubar_last or id == menubar_hamburger;
+}
 fn menubarStatus(id: u32) []const u8 {
     for (menubar_menus) |entry| for (entry.items) |row| {
         if (row.id == id) return row.label;
@@ -242,6 +256,8 @@ pub const Demo = struct {
     /// The docked window's menubar slides in only at the top edge, like macOS's.
     menubar_autohide: bool = false,
     menubar_revealed: bool = false,
+    /// The menus are behind `menubar_hamburger` because the title bar is too narrow.
+    menubar_collapsed: bool = false,
     /// Static text can be highlighted by dragging and copied (View > Selectable Text); off by default.
     selectable_text: bool = false,
     text_selection: ?ui.TextSelection = null,
@@ -312,7 +328,7 @@ pub const Demo = struct {
     control_cursors: []ui.Cursor = &.{},
     scene_viewport: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     scene_clip: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    overlay_rects: [12]ui.Rect = [_]ui.Rect{.{ .x = 0, .y = 0, .w = 0, .h = 0 }} ** 12,
+    overlay_rects: [13]ui.Rect = [_]ui.Rect{.{ .x = 0, .y = 0, .w = 0, .h = 0 }} ** 13,
 
     pub fn relayout(self: *Demo, allocator: std.mem.Allocator, viewport: ui.Rect, font: *const ui.Font) !void {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -507,7 +523,7 @@ pub const Demo = struct {
         }
         self.focus = self.indexOf(old_id) orelse 0;
         self.markFocus(root, font);
-        for ([_]u32{ 325, 423, 427, 433, 436, 438, 445, menubar_popup_id, submenu_popup_id, nav_popup_id, text_menu_popup_id, 344 }, 0..) |id, i| {
+        for ([_]u32{ 325, 423, 427, 433, 436, 438, 445, menubar_popup_id, submenu_popup_id, nav_popup_id, text_menu_popup_id, 344, nested_popup_id }, 0..) |id, i| {
             self.overlay_rects[i] = if (root.find(id)) |overlay| overlay.bounds.intersection(overlay.clip) else .{ .x = 0, .y = 0, .w = 0, .h = 0 };
         }
         self.divider_track = if (root.find(481)) |track| track.bounds else .{ .x = 0, .y = 0, .w = 0, .h = 0 };
@@ -525,6 +541,13 @@ pub const Demo = struct {
             inline for (.{ .close, .minimize, .maximize }) |part| if (root.find(ui.titlebar.id(titlebar_first, @intCast(slot), part))) |button| {
                 frame.buttons[frame.count] = local(button.bounds, origin);
                 frame.count += 1;
+            };
+            // The menus sharing the bar: from the first trigger to the last.
+            if (slot == 0) for ([_]u32{ menubar_hamburger, menubar_first_id + 1 }) |first| if (root.find(first)) |start| {
+                const end = (if (first == menubar_hamburger) start else root.find(menubar_last)) orelse start;
+                frame.controls = local(.{ .x = start.bounds.x, .y = start.bounds.y, .w = end.bounds.x + end.bounds.w - start.bounds.x, .h = start.bounds.h }, origin);
+                if (frame.controls.y < bar.bounds.y + bar.bounds.h) break;
+                frame.controls = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
             };
         }
         if (root.find(gallery_id)) |gallery| self.gallery_top = gallery.bounds.y + self.scroll.offset.y - self.scroll.viewport.y;
@@ -852,7 +875,7 @@ pub const Demo = struct {
         const id = self.focusId();
         self.keyboard_focus = true;
         if (self.menubar_open != 0) {
-            var rows: [16]u32 = undefined;
+            var rows: [32]u32 = undefined;
             const count = self.menubarRows(&rows);
             if (count == 0) return false;
             const at = std.mem.indexOfScalar(u32, rows[0..count], id) orelse (if (direction > 0) count - 1 else 0);
@@ -861,10 +884,10 @@ pub const Demo = struct {
             self.menubar_highlight = next_row;
             return true;
         }
-        if (id >= menubar_first_id + 1 and id <= menubar_last and self.menubar_open == 0) {
+        if (isMenubarTrigger(id) and self.menubar_open == 0) {
             _ = self.dismiss();
             self.menubar_open = id;
-            var rows: [16]u32 = undefined;
+            var rows: [32]u32 = undefined;
             if (self.menubarRows(&rows) > 0) {
                 self.menubar_highlight = rows[0];
                 self.restore_focus = rows[0];
@@ -929,21 +952,36 @@ pub const Demo = struct {
         }
         return false;
     }
-    /// Actionable rows of the open menubar menu (and its open submenu), in order.
-    fn menubarRows(self: *const Demo, out: *[16]u32) usize {
+    /// Actionable rows of the open menubar menu (and its open submenus), in order.
+    fn menubarRows(self: *const Demo, out: *[32]u32) usize {
         var count: usize = 0;
-        for (menubar_menus) |entry| if (entry.id == self.menubar_open) {
-            for (entry.items) |row| {
-                if (row.kind == .separator or row.kind == .label or row.disabled) continue;
-                out[count] = row.id;
-                count += 1;
-                if (row.kind == .submenu and row.id == self.menubar_submenu) for (row.items) |sub| {
-                    out[count] = sub.id;
-                    count += 1;
-                };
-            }
-        };
+        if (self.menubar_open == menubar_hamburger) {
+            appendMenuRows(&menubar_collapsed_rows, self.menubar_submenu, out, &count);
+        } else for (menubar_menus) |entry| if (entry.id == self.menubar_open) appendMenuRows(entry.items, self.menubar_submenu, out, &count);
         return count;
+    }
+    fn appendMenuRows(items: []const W.MenuItem, open_submenu: u32, out: *[32]u32, count: *usize) void {
+        for (items) |row| {
+            if (row.kind == .separator or row.kind == .label or row.disabled or count.* == out.len) continue;
+            out[count.*] = row.id;
+            count.* += 1;
+            if (W.submenuOpen(row, open_submenu)) appendMenuRows(row.items, open_submenu, out, count);
+        }
+    }
+    /// The submenu that holds `id` in the open menubar menu, or 0 at the top level.
+    fn menubarParent(self: *const Demo, id: u32) u32 {
+        if (id == 0) return 0; // separators and headings
+        const top: []const W.MenuItem = if (self.menubar_open == menubar_hamburger) &menubar_collapsed_rows else for (menubar_menus) |entry| {
+            if (entry.id == self.menubar_open) break entry.items;
+        } else return 0;
+        return parentIn(top, 0, id) orelse 0;
+    }
+    fn parentIn(items: []const W.MenuItem, parent: u32, id: u32) ?u32 {
+        for (items) |row| {
+            if (row.id == id) return parent;
+            if (row.kind == .submenu) if (parentIn(row.items, row.id, id)) |found| return found;
+        }
+        return null;
     }
     /// Arrow keys on a DevTools tree row (up/down/left/right).
     pub fn treeKey(self: *Demo, key: EditKey) bool {
@@ -962,19 +1000,34 @@ pub const Demo = struct {
         const id = self.focusId();
         self.keyboard_focus = true;
         // Left/right across the menubar keeps a menu open, like desktop menu bars.
+        if (self.menubar_open == menubar_hamburger) {
+            // Right opens the highlighted menu or submenu; left closes the one around the highlight.
+            const opens = id == share_id or id >= menubar_first_id + 1 and id <= menubar_last;
+            if (direction > 0 and opens) {
+                self.menubar_submenu = id;
+            } else if (direction < 0) {
+                const parent = self.menubarParent(id);
+                if (parent == 0) return true;
+                self.menubar_submenu = self.menubarParent(parent);
+                self.menubar_highlight = parent;
+                self.restore_focus = parent;
+            }
+            return true;
+        }
+        if (id == menubar_hamburger) return false;
         if (self.menubar_open != 0 or (id >= menubar_first_id + 1 and id <= menubar_last)) {
-            if (direction > 0 and self.menubar_open != 0 and id == menubar_first_id + 13) {
+            if (direction > 0 and self.menubar_open != 0 and id == share_id) {
                 self.menubar_submenu = id;
                 return true;
             }
             const current = if (self.menubar_open != 0) self.menubar_open else id;
-            const next_menu = menubar_first_id + 1 + @as(u32, @intCast(@mod(@as(i32, @intCast(current - menubar_first_id - 1)) + direction, 4)));
+            const next_menu = menubar_first_id + 1 + @as(u32, @intCast(@mod(@as(i32, @intCast(current - menubar_first_id - 1)) + direction, @as(i32, menubar_menus.len))));
             const was_open = self.menubar_open != 0;
             self.focus = self.indexOf(next_menu) orelse return false;
             if (was_open) {
                 self.menubar_open = next_menu;
                 self.menubar_submenu = 0;
-                var rows: [16]u32 = undefined;
+                var rows: [32]u32 = undefined;
                 if (self.menubarRows(&rows) > 0) self.menubar_highlight = rows[0];
             }
             return true;
@@ -1000,7 +1053,7 @@ pub const Demo = struct {
     pub fn confirmMenu(self: *Demo) bool {
         if (self.composition_len > 0) return false;
         const id = self.focusId();
-        if (self.menubar_open != 0 and id >= menubar_first_id + 1 and id <= menubar_last) {
+        if (self.menubar_open != 0 and isMenubarTrigger(id)) {
             self.focus = self.indexOf(self.menubar_highlight) orelse return false;
             self.activate();
             return true;
@@ -1038,6 +1091,8 @@ pub const Demo = struct {
         // Any press drops the highlight, as in a browser (except on the text menu, which copies
         // it); one off any control starts a new one.
         if (!self.overlay_rects[10].contains(x, y)) self.text_selection = null;
+        // A press off an open menubar menu closes it, even one a pane, the dock or the title bar takes.
+        if (self.menubar_open != 0 and !self.onMenubar(x, y)) _ = self.dismiss();
         if (!self.inTools(x, y) and self.devtools.pointerDown(x, y)) return;
         if (!self.dialog_open and self.scroll.pointerDown(x, y)) return;
         for (self.panes()) |pane| if ((!self.dialog_open or self.inTools(x, y)) and self.paneVisible(pane).contains(x, y) and pane.pointerDown(x, y)) return;
@@ -1116,6 +1171,18 @@ pub const Demo = struct {
             self.text_selection = .{ .anchor = .init(x, y), .focus = .init(x, y) };
             self.selecting_text = true;
         }
+    }
+    /// Whether (`x`, `y`) is on the open menubar menu, its submenus, or a menubar trigger.
+    fn onMenubar(self: *const Demo, x: f32, y: f32) bool {
+        for ([_]usize{ 7, 8, 12 }) |i| if (self.overlay_rects[i].contains(x, y)) return true;
+        for (self.control_clips[0..self.control_count], self.control_ids[0..self.control_count]) |rect, id| {
+            if (isMenubarTrigger(id) and rect.contains(x, y)) return true;
+        }
+        return false;
+    }
+    /// Whether a popup is open that a press outside should close first.
+    pub fn popupOpen(self: *const Demo) bool {
+        return self.menubar_open != 0 or self.select_open or self.quality_open or self.menu_open or self.context_point != null or self.text_menu != null or self.combo_open or self.command_open or self.popover_open or self.nav_open != 0 or self.calendar_open;
     }
     pub fn touchDown(self: *Demo, x: f32, y: f32, font: *const ui.Font) void {
         // A new touch catches anything still gliding.
@@ -1329,7 +1396,7 @@ pub const Demo = struct {
             return true;
         }
         if (self.dock.dismissMenu()) return true;
-        const had_popup = self.select_open or self.quality_open or self.menu_open or self.context_point != null or self.text_menu != null or self.combo_open or self.command_open or self.popover_open or self.menubar_open != 0 or self.nav_open != 0 or self.calendar_open;
+        const had_popup = self.popupOpen();
         if (self.menubar_open != 0) self.restore_focus = self.menubar_open;
         if (self.nav_open != 0) self.restore_focus = self.nav_open;
         self.menubar_open = 0;
@@ -1476,13 +1543,19 @@ pub const Demo = struct {
                 self.question = 0;
                 self.answers = .{ 0, 0, 0 };
             },
-            menubar_first_id + 1...menubar_last => {
+            menubar_first_id + 1...menubar_last, menubar_hamburger => {
+                // Behind the hamburger, File, Edit and the rest are submenu rows.
+                if (self.menubar_open == menubar_hamburger and id != menubar_hamburger) {
+                    self.menubar_highlight = id;
+                    self.menubar_submenu = if (self.menubar_submenu == id or self.menubarParent(self.menubar_submenu) == id) 0 else id;
+                    return;
+                }
                 const open = self.menubar_open != id;
                 _ = self.dismiss();
                 self.restore_focus = id;
                 if (open) {
                     self.menubar_open = id;
-                    var rows: [16]u32 = undefined;
+                    var rows: [32]u32 = undefined;
                     if (self.menubarRows(&rows) > 0) self.menubar_highlight = rows[0];
                 }
             },
@@ -1503,8 +1576,8 @@ pub const Demo = struct {
             },
             menubar_first_id + 10...menubar_first_id + 49 => {
                 self.menubar_highlight = id;
-                if (id == menubar_first_id + 13) {
-                    self.menubar_submenu = if (self.menubar_submenu == id) 0 else id;
+                if (id == share_id) {
+                    self.menubar_submenu = if (self.menubar_submenu == id) self.menubarParent(id) else id;
                     return;
                 }
                 switch (id) {
@@ -1753,6 +1826,8 @@ pub const FrameRects = struct {
     bar: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     buttons: [3]ui.Rect = @splat(.{ .x = 0, .y = 0, .w = 0, .h = 0 }),
     count: u8 = 0,
+    /// The menus on the bar, which take presses instead of dragging the window.
+    controls: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
 };
 
 /// Dock panels in the editor layout.
@@ -1839,10 +1914,32 @@ fn layoutDock(b: L.Builder, demo: *Demo, viewport: ui.Rect, count_buf: *[20]u8, 
 
 /// `content` under a title bar for window `slot`, laid out in `full`.
 fn framed(b: L.Builder, demo: *Demo, slot: u32, title: []const u8, full: ui.Rect, content: *L.Element, font: *const ui.Font) !*L.Element {
-    const title_bar = try ui.titlebar.bar(b, titlebar_first, slot, title, demo.frame_layout, demo.window_state[slot]);
+    const menus = if (slot == 0 and menusInTitlebar(demo)) try titlebarMenus(b, demo, title, full.w, font) else null;
+    const title_bar = try ui.titlebar.barWithMenus(b, titlebar_first, slot, title, demo.frame_layout, demo.window_state[slot], menus);
     const root = try b.node(0, .{ .width = full.w, .height = full.h }, .none, &.{ title_bar, content });
     root.layout(full, font);
     return root;
+}
+/// With a drawn title bar the menus share its row, like VS Code's.
+fn menusInTitlebar(demo: *const Demo) bool {
+    return demo.custom_frame;
+}
+/// The menus for the main window's title bar: all of them when they fit beside the buttons and
+/// title in `width`, else a hamburger that lists them.
+fn titlebarMenus(b: L.Builder, demo: *Demo, title: []const u8, width: f32, font: *const ui.Font) !*L.Element {
+    const was_collapsed = demo.menubar_collapsed;
+    demo.menubar_collapsed = false;
+    const probe = try ui.titlebar.barWithMenus(b, titlebar_first, 0, title, demo.frame_layout, demo.window_state[0], try menubarFor(b, demo, .titlebar));
+    demo.menubar_collapsed = probe.preferredWidth(font) > width;
+    // Keep an open menu open across the switch: as a submenu of the hamburger, or closed.
+    if (demo.menubar_collapsed and !was_collapsed and demo.menubar_open >= menubar_first_id + 1 and demo.menubar_open <= menubar_last) {
+        if (demo.menubar_submenu == 0) demo.menubar_submenu = demo.menubar_open;
+        demo.menubar_open = menubar_hamburger;
+    } else if (!demo.menubar_collapsed and demo.menubar_open == menubar_hamburger) {
+        demo.menubar_open = 0;
+        demo.menubar_submenu = 0;
+    }
+    return menubarFor(b, demo, .titlebar);
 }
 fn belowBar(demo: *const Demo, full: ui.Rect) ui.Rect {
     if (!demo.custom_frame) return full;
@@ -1894,7 +1991,8 @@ fn layoutMain(b: L.Builder, demo: *Demo, full: ui.Rect, count_buf: *[20]u8, font
     // edge or on the bar, or a menu is open.
     const bar_height = W.window_menubar_height;
     demo.menubar_revealed = demo.menubar_open != 0 or (demo.pointer_y >= full.y and demo.pointer_y < full.y + if (demo.menubar_revealed) bar_height else 4);
-    const menu_height = if (demo.docked and !demo.menubar_autohide) bar_height else 0;
+    const own_row = demo.docked and !menusInTitlebar(demo);
+    const menu_height = if (own_row and !demo.menubar_autohide) bar_height else 0;
     const area = ui.Rect{ .x = full.x, .y = full.y + menu_height, .w = full.w, .h = @max(0, full.h - menu_height) };
     const page = if (demo.docked) try layoutDock(b, demo, area, count_buf, font) else try layoutPage(b, demo, area, count_buf, font);
     // DevTools property edits outlive the rebuild, like styles edited in a browser.
@@ -1908,8 +2006,8 @@ fn layoutMain(b: L.Builder, demo: *Demo, full: ui.Rect, count_buf: *[20]u8, font
     }
     var children: std.ArrayList(*L.Element) = .empty;
     if (demo.menubar_autohide) try children.append(b.allocator, page);
-    if (!demo.menubar_autohide or demo.menubar_revealed) {
-        const menu = try menubarFor(b, demo, true);
+    if (own_row and (!demo.menubar_autohide or demo.menubar_revealed)) {
+        const menu = try menubarFor(b, demo, .window);
         menu.style.width = full.w;
         if (demo.menubar_autohide) {
             menu.overlay = .{ .point = .init(full.x, full.y) };
@@ -2069,9 +2167,10 @@ fn menusCard(b: L.Builder, demo: *Demo) !*L.Element {
     };
     return b.card(&.{
         try label(b, "Menubar and navigation", 22, false, false),
-        try label(b, if (demo.docked) "The menubar runs along the top of the window. Arrow keys move between menus and items; Escape closes." else "Arrow keys move between menus and items; Escape closes.", 14, true, true),
-        // Docked, the menubar is the window's own (see `layoutMain`); its ids exist once.
-        if (demo.docked) try b.node(0, .{}, .none, &.{}) else try menubarFor(b, demo, false),
+        try label(b, if (demo.docked or menusInTitlebar(demo)) "The menubar runs along the top of the window. Arrow keys move between menus and items; Escape closes." else "Arrow keys move between menus and items; Escape closes.", 14, true, true),
+        // Docked or in the title bar, the menubar is the window's own (see `layoutMain` and
+        // `framed`); its ids exist once.
+        if (demo.docked or menusInTitlebar(demo)) try b.node(0, .{}, .none, &.{}) else try menubarFor(b, demo, .card),
         nav,
     });
 }
@@ -2095,8 +2194,9 @@ fn textMenu(b: L.Builder, demo: *const Demo) !?*L.Element {
     return popup;
 }
 
-/// File, Edit, View and Profiles: in a card, or `flush` along the window's top edge.
-fn menubarFor(b: L.Builder, demo: *Demo, flush: bool) !*L.Element {
+/// File, Edit, View, Profiles and Windows: in a card, along the window's top edge, or in the
+/// title bar (behind a hamburger while `demo.menubar_collapsed`).
+fn menubarFor(b: L.Builder, demo: *Demo, placement: enum { card, window, titlebar }) !*L.Element {
     // Copy the static menus so checkbox and radio rows reflect current state.
     const menus = try b.allocator.dupe(W.MenubarMenu, &menubar_menus);
     for (menus) |*entry| {
@@ -2111,16 +2211,29 @@ fn menubarFor(b: L.Builder, demo: *Demo, flush: bool) !*L.Element {
             menubar_first_id + 40...menubar_first_id + 42 => row.id == demo.profile,
             else => false,
         };
+        // Menus in the title bar never hide.
+        for (rows) |*row| if (row.id == menubar_first_id + 36 and menusInTitlebar(demo)) {
+            row.disabled = true;
+        };
         entry.items = rows;
     }
-    const bar = if (flush)
-        try W.windowMenubar(b, menus, demo.menubar_open, demo.menubar_highlight, demo.menubar_submenu)
-    else
-        try W.menubar(b, menus, demo.menubar_open, demo.menubar_highlight, demo.menubar_submenu);
+    const bar = switch (placement) {
+        .card => try W.menubar(b, menus, demo.menubar_open, demo.menubar_highlight, demo.menubar_submenu),
+        .window => try W.windowMenubar(b, menus, demo.menubar_open, demo.menubar_highlight, demo.menubar_submenu),
+        .titlebar => if (demo.menubar_collapsed) blk: {
+            const rows = try b.allocator.alloc(W.MenuItem, menus.len);
+            for (rows, menus) |*row, entry| row.* = .{ .id = entry.id, .label = entry.label, .kind = .submenu, .items = entry.items };
+            break :blk try W.titlebarMenubar(b, &.{.{ .id = menubar_hamburger, .label = "Menu", .icon = .menu, .items = rows }}, demo.menubar_open, demo.menubar_highlight, demo.menubar_submenu);
+        } else try W.titlebarMenubar(b, menus, demo.menubar_open, demo.menubar_highlight, demo.menubar_submenu),
+    };
+    // Name each level of open popup so pointer presses inside them count as inside.
     for (bar.children[0].children) |child| if (child.overlay != null) {
         child.id = menubar_popup_id;
         for (child.children) |row| if (row.overlay != null) {
             row.id = submenu_popup_id;
+            for (row.children) |nested| if (nested.overlay != null) {
+                nested.id = nested_popup_id;
+            };
         };
     };
     return bar;
@@ -2670,6 +2783,7 @@ test "gallery actions, editing, reverse focus and nested wheels update state" {
         question_first_id + 17,
         question_first_id + 19,
         menubar_first_id + 1...menubar_last,
+        menubar_hamburger,
         nav_first_id...nav_first_id + 2,
         color_first_id...color_first_id + 14,
         first_swatch_id...first_swatch_id + swatches.len - 1,
@@ -3342,6 +3456,43 @@ test "custom title bars follow the desktop's button layout and request window ac
     try demo.relayout(std.testing.allocator, viewport, &font);
     try std.testing.expectEqual(@as(f32, 0), demo.frames[1].bar.x);
     try std.testing.expectEqual(@as(f32, 400), demo.frames[1].bar.w);
+}
+
+test "title bar menus share the row with the buttons and collapse behind a hamburger" {
+    var font = try ui.Font.init(std.testing.allocator, ui.default_font);
+    defer font.deinit();
+    var demo: Demo = .{ .docked = true, .custom_frame = true };
+    defer demo.deinit();
+    try demo.relayout(std.testing.allocator, .{ .x = 0, .y = 0, .w = 1200, .h = 800 }, &font);
+    // Wide: File and friends sit on the title bar, which the hit test leaves clickable there.
+    try std.testing.expect(!demo.menubar_collapsed);
+    const file = demo.controls[demo.indexOf(menubar_first_id + 1).?];
+    try std.testing.expect(file.y < ui.titlebar.height);
+    try std.testing.expect(demo.frames[0].controls.contains(file.x + 1, file.y + 1));
+    try std.testing.expect(demo.indexOf(menubar_hamburger) == null);
+    // A press elsewhere closes an open menu.
+    try std.testing.expect(demo.accessibilityAction(menubar_first_id + 1, .click));
+    try demo.relayout(std.testing.allocator, .{ .x = 0, .y = 0, .w = 1200, .h = 800 }, &font);
+    try std.testing.expect(demo.popupOpen());
+    const tab = demo.controls[demo.indexOf(ui.dock.first_id + @intFromEnum(Panel.components)).?];
+    demo.pointerDown(tab.x + 4, tab.y + 4);
+    demo.pointerUp();
+    try std.testing.expectEqual(@as(u32, 0), demo.menubar_open);
+    // Narrow: one hamburger; its rows open the menus, and File's Share opens inside that.
+    try demo.relayout(std.testing.allocator, .{ .x = 0, .y = 0, .w = 360, .h = 640 }, &font);
+    try std.testing.expect(demo.menubar_collapsed);
+    try std.testing.expect(demo.indexOf(menubar_first_id + 1) == null);
+    try std.testing.expect(demo.accessibilityAction(menubar_hamburger, .click));
+    try demo.relayout(std.testing.allocator, .{ .x = 0, .y = 0, .w = 360, .h = 640 }, &font);
+    try std.testing.expect(demo.accessibilityAction(menubar_first_id + 1, .click));
+    try demo.relayout(std.testing.allocator, .{ .x = 0, .y = 0, .w = 360, .h = 640 }, &font);
+    try std.testing.expect(demo.accessibilityAction(share_id, .click));
+    try demo.relayout(std.testing.allocator, .{ .x = 0, .y = 0, .w = 360, .h = 640 }, &font);
+    try std.testing.expect(demo.indexOf(menubar_first_id + 14) != null);
+    try std.testing.expect(demo.overlay_rects[12].w > 0);
+    // Closing Share leaves File open.
+    try std.testing.expect(demo.accessibilityAction(share_id, .click));
+    try std.testing.expectEqual(menubar_first_id + 1, demo.menubar_submenu);
 }
 
 test "the cursor follows hovered controls and ongoing drags" {

@@ -65,6 +65,13 @@ const Glyph = struct { button: Button, style: Style, maximized: bool, id: u32, f
 /// A title bar: platform buttons on their sides and the title in the middle. Its element has id
 /// `id(first_id, slot, .bar)`; the button elements carry the other three ids.
 pub fn bar(b: L.Builder, first_id: u32, slot: u32, title: []const u8, layout: Layout, state: State) !*L.Element {
+    return barWithMenus(b, first_id, slot, title, layout, state, null);
+}
+
+/// `bar` with `menus` (say `widgets.titlebarMenubar`) on the same row, after any left-hand
+/// buttons. Tell the backend where they are (`weeoui_sdl3.Frame.controls`) so presses on them
+/// reach the app instead of dragging the window.
+pub fn barWithMenus(b: L.Builder, first_id: u32, slot: u32, title: []const u8, layout: Layout, state: State, menus: ?*L.Element) !*L.Element {
     var children: std.ArrayList(*L.Element) = .empty;
     const group = struct {
         fn make(builder: L.Builder, list: *std.ArrayList(*L.Element), buttons: [3]?Button, l: Layout, s: State, first: u32, window: u32) !void {
@@ -73,7 +80,12 @@ pub fn bar(b: L.Builder, first_id: u32, slot: u32, title: []const u8, layout: La
             try list.append(builder.allocator, try builder.node(0, .{ .direction = .row, .gap = if (l.style == .mac) 8 else if (l.style == .gnome) 12 else 0, .align_items = .center, .padding = .{ .left = if (l.style == .windows) 0 else 12, .right = if (l.style == .windows) 0 else 12 }, .height = height }, .none, row.items));
         }
     }.make;
-    try group(b, &children, layout.left, layout, state, first_id, slot);
+    // Menus start at the edge when no buttons are on their side.
+    const left_empty = for (layout.left) |button| {
+        if (button != null) break false;
+    } else true;
+    if (menus == null or !left_empty) try group(b, &children, layout.left, layout, state, first_id, slot);
+    if (menus) |m| try children.append(b.allocator, m);
     const label = try b.node(0, .{ .grow = 1, .height = height }, .{ .text = .{ .value = title, .size = 13, .tone = if (state.focused) .foreground else .muted, .alignment = .center } }, &.{});
     label.accessibility.role = .heading;
     try children.append(b.allocator, label);

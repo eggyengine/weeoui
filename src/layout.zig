@@ -304,6 +304,12 @@ pub const Element = struct {
         clearMeasurements(self);
         place(self, viewport, viewport, font, false);
     }
+    /// The width this element asks for before any growing or shrinking, e.g. to choose a
+    /// compact variant when a row would not fit.
+    pub fn preferredWidth(self: *Element, font: *const Font) f32 {
+        clearMeasurements(self);
+        return naturalWidth(self, font);
+    }
     /// Outline what pointer hit-testing sees (bounds within clip) for every actionable element.
     pub fn drawHitboxes(self: *const Element, c: *Canvas) !void {
         const previous = c.clip;

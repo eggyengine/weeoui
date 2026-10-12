@@ -275,6 +275,12 @@ pub const Frame = struct {
     bar: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     buttons: [3]ui.Rect = @splat(.{ .x = 0, .y = 0, .w = 0, .h = 0 }),
     button_count: u8 = 0,
+    /// Other controls on the bar, such as menus from `ui.titlebar.barWithMenus`; presses there
+    /// go to the app rather than moving the window.
+    controls: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// While a menu or other popup is open the bar doesn't drag, so the press that closes it
+    /// reaches the app; the next one moves the window.
+    popup_open: bool = false,
     /// UI units per window point (e.g. 1 / ui scale).
     scale: f32 = 1,
 };
@@ -291,17 +297,20 @@ fn frameHitTest(window: sdl3.video.Window, area: sdl3.rect.IPoint, frame: ?*Fram
     const f = frame orelse return .normal;
     const size = window.getSize() catch return .normal;
     const s = f.scale;
+    var clickable: [4]ui.Rect = undefined;
+    @memcpy(clickable[0..f.button_count], f.buttons[0..f.button_count]);
+    clickable[f.button_count] = f.controls;
     const hit = ui.titlebar.hitTest(
         .{ @as(f32, @floatFromInt(size.@"0")) * s, @as(f32, @floatFromInt(size.@"1")) * s },
         f.bar,
-        f.buttons[0..f.button_count],
+        clickable[0 .. f.button_count + 1],
         window.getFlags().maximized,
         @as(f32, @floatFromInt(area.x)) * s,
         @as(f32, @floatFromInt(area.y)) * s,
     );
     return switch (hit) {
         .normal => .normal,
-        .drag => .draggable,
+        .drag => if (f.popup_open) .normal else .draggable,
         .resize_top_left => .resize_top_left,
         .resize_top => .resize_top,
         .resize_top_right => .resize_top_right,
