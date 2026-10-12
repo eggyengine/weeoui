@@ -24,9 +24,12 @@ fn frame(count: *u32, ctx: *ui.Context) !void {
 - **Components**: buttons, inputs, selects, tabs, sliders, dialogs, tables, toasts, charts, images and a colour picker. Everything uses the warm "yolk" theme, in light or dark.
 - **Layout**: flex rows and columns, grids, wrapping, right-to-left text and scroll areas.
 - **Editor tooling**: dockable panels, custom title bars, and DevTools that inspect the UI while it runs.
+- **Desktop, Android and the web**: Vulkan on desktop and Android, WebGPU in the browser. [Try the live demo](pathname:///demo/).
 - **Accessibility**: every control is exposed to screen readers through AccessKit. Keyboard focus, focus rings and pointer cursors work out of the box.
 
 ## Modules
+
+`addApp` gives an app all three. Engines that embed Weeoui enable the backends they want on the dependency.
 
 | Module | Build flag | Purpose |
 | --- | --- | --- |
@@ -38,4 +41,5 @@ fn frame(count: *u32, ctx: *ui.Context) !void {
 
 - [Getting started](./getting-started.md): add Weeoui and run the counter.
 - [Build a small app](./guide/first-app.md): state, forms, lists and dialogs.
+- [Run in the browser](./guide/web.md): build for WebGPU and host the page.
 - [API reference](pathname:///api/): the Zig-generated docs for every public declaration.

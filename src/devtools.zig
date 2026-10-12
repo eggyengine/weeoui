@@ -841,8 +841,9 @@ fn facts(b: L.Builder, element: *const L.Element) !*L.Element {
 pub var console: ?*Devtools = null;
 
 /// `std.Options.logFn` that also shows info, warnings and errors in the DevTools console.
+/// In the browser, where Zig 0.16 can't build its stderr logger, it writes to the browser console.
 pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
-    std.log.defaultLog(level, scope, format, args);
+    if (@import("builtin").os.tag == .emscripten) @import("web.zig").log(level, scope, format, args) else std.log.defaultLog(level, scope, format, args);
     const sink = console orelse return;
     const mapped: Level = switch (level) {
         .err => .err,

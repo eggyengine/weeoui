@@ -30,6 +30,8 @@ export default {
         { to: '/', label: 'Guide', position: 'left' },
         // Zig's generated docs are copied to build/api by the workflow.
         { to: 'pathname:///api/', label: 'API reference', position: 'left' },
+        // The component gallery built for WebGPU, copied to build/demo by the workflow.
+        { to: 'pathname:///demo/', label: 'Live demo', position: 'left' },
         { href: 'https://github.com/eggyengine/weeoui', label: 'GitHub', position: 'right' },
       ],
     },

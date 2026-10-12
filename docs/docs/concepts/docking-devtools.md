@@ -16,10 +16,10 @@ Both of these work on the element tree from `ui.Layout` (built with a `Layout.Bu
 ### What it can do
 
 - **Splits and tab stacks.** Panels sit in a tree of horizontal and vertical splits that the user can resize. Each leaf is a stack of tabs.
-- **Drag to rearrange.** Dragging a tab shows a compass over the stack under the pointer. Dropping on the centre adds it as a tab, and dropping on an edge splits that side.
+- **Drag to rearrange.** Dragging a tab shows a compass over the stack under the pointer. Dropping on the centre adds it as a tab, and dropping on an edge splits that side. Dropping on a tab bar puts the tab between the tabs under the pointer, so tabs reorder within a stack too.
 - **Floating windows.** A panel can float inside the main window, with its own title bar buttons to close, minimise (fold to the tab bar) and maximise (fill the window).
 - **Pop out to OS windows.** A panel can move into its own operating-system window and later dock back. If your app can't open extra windows, set `os_windows = false` and pop-outs float instead.
-- **Tab menu.** Every stack has a menu with pop out, float and dock back.
+- **Tab menu.** Every stack has a menu with pop out, float, dock back and close. Middle-clicking a tab closes it too (`closeTab`). A closed panel comes back with `add`; the gallery lists every panel in its Windows menu.
 - **Native-looking buttons.** Floating windows order and style their buttons from `buttons`. Use `weeoui_sdl3.buttonLayout` to read the desktop's layout.
 - **Accessibility.** Splitters are announced as sliders, and tabs and buttons are focusable.
 
@@ -51,6 +51,7 @@ try dock.add(@intFromEnum(Panel.assets), @intFromEnum(Panel.console), .center); 
 
 - `remove(panel)`
 - `move(panel, node, side)`
+- `moveTab(panel, node, slot)`, which puts the tab before tab `slot` of a stack (also within its own stack)
 - `float(panel, rect)`
 - `detach(panel)`, which moves the panel into an OS window
 - `redock(host)`
@@ -95,6 +96,7 @@ Every id the dock creates lies at or above `ui.dock.first_id`. Your hit testing 
 | Event | Call |
 | --- | --- |
 | Pointer pressed on an id | `dock.press(id, x, y)`. Returns `true` if the dock handled it. |
+| Middle button pressed on an id | `dock.closeTab(id)`. Returns `true` if it was a tab, and closes its panel. |
 | Pointer moved while `dock.dragging()` | `dock.dragTo(x, y)` |
 | Pointer released while dragging | `dock.release(x, y)` |
 | Enter or Space on a focused id | `dock.activate(id)`. Returns `true` if handled. |
@@ -169,6 +171,14 @@ DevTools ids lie at or above `ui.devtools.first_id`.
 | Tab order | Skip ids for which `devtools.skipInTabOrder(id)` returns `true` |
 
 Set `devtools.inspecting = true` to enter pick mode. In pick mode, hovering highlights elements and a click selects one. Show a crosshair cursor while it's on.
+
+## Menu bar
+
+`ui.widgets.windowMenubar` is the app menu for the top of a window: the same menus as `ui.widgets.menubar`, as a flush strip `window_menubar_height` tall instead of a card. Set its `style.width` to the window's and put your content below it. The gallery (`examples/gallery`) also auto-hides it like macOS does: View > Auto-hide Menu Bar gives the panels the whole window and slides the bar over them while the pointer is at the top edge or a menu is open.
+
+## Selectable text
+
+Static text isn't selectable by default. To let people highlight and copy it, keep a `ui.TextSelection`. Start one when a drag begins on no control (`anchor` and `focus` at the pointer), move its `focus` with the pointer, and draw with `canvas.text_selection` set to paint the highlight. `root.selectedText(selection, &font)` returns the highlighted characters for Ctrl+C. A selection stays inside the text element where it started. The gallery turns this on with View > Selectable Text. Its right-click text menu (Cut, Copy, Paste and Select All, or Copy for highlighted text) is in `examples/gallery/demo.zig` too: a `ui.widgets.menuItems` popup placed at the pointer, which hands the clipboard command to the app.
 
 ## Title bars
 

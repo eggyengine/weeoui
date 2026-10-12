@@ -31,7 +31,8 @@ const menu_item_first = first_id + 0x1_0600;
 /// Floating windows' close/minimize/maximize: + floating * 3 + `titlebar.Button`.
 const window_button_first = first_id + 0x1_0800;
 const last_id = window_button_first + max_floating * 3;
-fn owns(id: u32) bool {
+/// Whether `id` is one of the dock's own controls (tabs, splitters, window buttons, menus).
+pub fn owns(id: u32) bool {
     return id >= first_id and id < last_id;
 }
 
@@ -62,6 +63,8 @@ const Node = struct {
     count: u8 = 0,
     active: u8 = 0,
     rect: Rect = zero,
+    /// Left and right edge of each tab where it was last drawn, to drop a dragged tab between them.
+    tab_spans: [max_tabs][2]f32 = undefined,
 };
 
 pub const Floating = struct {
@@ -86,7 +89,8 @@ pub const Window = struct {
 
 /// Where a dragged tab would land.
 pub const Target = union(enum) {
-    node: struct { index: Index, side: Side },
+    /// `slot`: a drop on the tab bar, before tab `slot` (`count` for after the last).
+    node: struct { index: Index, side: Side, slot: ?u8 = null },
     float: Rect,
     window,
 };
@@ -245,6 +249,24 @@ pub const DockSpace = struct {
         const index = self.nodeOf(panel) orelse return;
         self.removeTab(index, panel);
         if (self.nodes[index].count == 0) self.collapse(index);
+    }
+
+    /// Move `panel` into tab stack `target` before tab `slot`; within its own stack this reorders.
+    pub fn moveTab(self: *DockSpace, panel: u32, target: Index, slot: u8) !void {
+        const source = self.nodeOf(panel) orelse return error.UnknownPanel;
+        var at = slot;
+        if (source == target) {
+            const from = std.mem.indexOfScalar(u32, self.nodes[source].panels[0..self.nodes[source].count], panel).?;
+            if (from < at) at -= 1; // its own slot closes up first
+        } else if (self.nodes[target].count == max_tabs) return error.TooManyTabs;
+        self.removeTab(source, panel);
+        const node = &self.nodes[target];
+        at = @min(at, node.count);
+        std.mem.copyBackwards(u32, node.panels[at + 1 .. node.count + 1], node.panels[at..node.count]);
+        node.panels[at] = panel;
+        node.active = at;
+        node.count += 1;
+        if (source != target and self.nodes[source].count == 0) self.collapse(source);
     }
 
     /// Move `panel` to `side` of tab stack `target`.
@@ -437,7 +459,8 @@ pub const DockSpace = struct {
                 switch ((id - menu_item_first) % 4) {
                     0 => self.detach(panel) catch {},
                     1 => self.float(panel, self.floatRect(panel, node.rect.x + 40, node.rect.y + 40)) catch {},
-                    else => self.redock(self.hostOf(index)),
+                    2 => self.redock(self.hostOf(index)),
+                    else => self.remove(panel),
                 }
             },
             window_button_first...window_button_first + max_floating * 3 - 1 => {
@@ -455,6 +478,13 @@ pub const DockSpace = struct {
             },
             else => {},
         }
+        return true;
+    }
+    /// Middle click: close the panel whose tab is `id`, like a browser tab. Returns whether `id`
+    /// was a tab.
+    pub fn closeTab(self: *DockSpace, id: u32) bool {
+        if (id <= tab_first or id >= tab_first + max_panel) return false;
+        self.remove(id - tab_first);
         return true;
     }
     /// Close the open stack menu (a press elsewhere, or Escape). Returns whether one was open.
@@ -508,7 +538,9 @@ pub const DockSpace = struct {
                 const target = self.targetAt(t.panel, x, y);
                 switch (target) {
                     .node => |n| {
-                        if (self.move(t.panel, n.index, n.side)) log.info("panel {d} docked {s}", .{ t.panel, @tagName(n.side) }) else |err| log.warn("cannot dock panel {d}: {s}", .{ t.panel, @errorName(err) });
+                        if (n.slot) |slot| {
+                            self.moveTab(t.panel, n.index, slot) catch |err| log.warn("cannot move tab {d}: {s}", .{ t.panel, @errorName(err) });
+                        } else if (self.move(t.panel, n.index, n.side)) log.info("panel {d} docked {s}", .{ t.panel, @tagName(n.side) }) else |err| log.warn("cannot dock panel {d}: {s}", .{ t.panel, @errorName(err) });
                     },
                     .float => |r| self.float(t.panel, r) catch {},
                     .window => self.detach(t.panel) catch {},
@@ -561,11 +593,19 @@ pub const DockSpace = struct {
         if (!self.viewport.contains(x, y)) return if (self.os_windows) .window else .{ .float = self.floatRect(panel, x, y) };
         if (self.stackAt(x, y)) |index| {
             for (self.compass(index)) |button| if (button.rect.contains(x, y)) return .{ .node = .{ .index = index, .side = button.side } };
-            // Dropping onto a tab bar joins that stack.
+            // Dropping onto a tab bar joins that stack, between the tabs under the pointer.
             const r = self.nodes[index].rect;
-            if (y < r.y + self.tab_height and y >= r.y) return .{ .node = .{ .index = index, .side = .center } };
+            if (y < r.y + self.tab_height and y >= r.y) return .{ .node = .{ .index = index, .side = .center, .slot = self.slotAt(index, x) } };
         }
         return .{ .float = self.floatRect(panel, x, y) };
+    }
+    fn slotAt(self: *const DockSpace, index: Index, x: f32) u8 {
+        const node = &self.nodes[index];
+        var slot: u8 = 0;
+        for (node.tab_spans[0..node.count]) |span| {
+            if (x > (span[0] + span[1]) / 2) slot += 1;
+        }
+        return slot;
     }
     fn floatRect(self: *const DockSpace, panel: u32, x: f32, y: f32) Rect {
         const r = if (self.nodeOf(panel)) |index| self.nodes[index].rect else zero;
@@ -580,7 +620,13 @@ pub const DockSpace = struct {
             .window => null,
             .float => |r| r,
             .node => |n| blk: {
-                const r = self.nodes[n.index].rect;
+                const node = &self.nodes[n.index];
+                const r = node.rect;
+                if (n.slot) |slot| {
+                    // An insertion bar between tabs.
+                    const x = if (node.count == 0) r.x + 3 else if (slot < node.count) node.tab_spans[slot][0] - 2 else node.tab_spans[node.count - 1][1] + 1;
+                    break :blk Rect{ .x = x - 1, .y = r.y + 3, .w = 3, .h = self.tab_height - 6 };
+                }
                 break :blk switch (n.side) {
                     .center => r,
                     .left => Rect{ .x = r.x, .y = r.y, .w = r.w / 2, .h = r.h },
@@ -646,7 +692,8 @@ pub const DockSpace = struct {
         for (node.panels[0..node.count], 0..) |panel, i| {
             const tab = try b.node(tab_first + panel, .{ .height = self.tab_height - 6 }, .{ .tab = .{ .label = provider.title(panel), .selected = i == node.active } }, &.{});
             tab.accessibility = .{ .role = .tab, .label = provider.title(panel) };
-            try tabs.append(b.allocator, tab);
+            // Paints nothing; notes where the tab landed, so drops can go between tabs.
+            try tabs.append(b.allocator, try b.node(0, .{}, .{ .custom = .{ .context = &self.nodes[index].tab_spans[i], .draw = recordSpan } }, &.{tab}));
         }
         try tabs.append(b.allocator, try b.node(0, .{ .grow = 1 }, .none, &.{}));
         if (node.count > 0) {
@@ -655,7 +702,7 @@ pub const DockSpace = struct {
             burger.accessibility = .{ .role = .button, .label = "Panel menu", .expanded = self.menu == index };
             try tabs.append(b.allocator, burger);
             if (self.menu == index) {
-                var items: [3]@import("widgets.zig").MenuItem = undefined;
+                var items: [4]@import("widgets.zig").MenuItem = undefined;
                 var n: usize = 0;
                 if (host != .window and self.os_windows) {
                     items[n] = .{ .id = menu_item_first + @as(u32, index) * 4, .label = "Pop out into window" };
@@ -669,6 +716,9 @@ pub const DockSpace = struct {
                     items[n] = .{ .id = menu_item_first + @as(u32, index) * 4 + 2, .label = "Dock back" };
                     n += 1;
                 }
+                // Apps bring a closed panel back with `add` (the gallery's Windows menu).
+                items[n] = .{ .id = menu_item_first + @as(u32, index) * 4 + 3, .label = "Close" };
+                n += 1;
                 const menu = try @import("widgets.zig").menuItems(b, items[0..n], 0, 0);
                 menu.style.width = 200;
                 try tabs.append(b.allocator, @import("widgets.zig").anchorTo(menu, burger, .bottom, 700));
@@ -750,6 +800,11 @@ const compass_contexts = blk: {
     };
     break :blk all;
 };
+
+fn recordSpan(context: *const anyopaque, _: *Canvas, r: Rect) anyerror!void {
+    const span: *[2]f32 = @ptrCast(@alignCast(@constCast(context)));
+    span.* = .{ r.x, r.x + r.w };
+}
 
 fn drawHint(_: *const anyopaque, c: *Canvas, r: Rect) anyerror!void {
     try c.roundRectAlpha(r, c.theme.ring, c.theme.radiusMd(), 0.25);
@@ -967,4 +1022,58 @@ test "splitters span their whole edge in both directions, so both can be grabbed
     dock.dragTo(700, 100);
     dock.release(700, 100);
     try std.testing.expect(dock.nodes[right].ratio < 0.25);
+}
+
+test "dropping a tab on a tab bar puts it between the tabs under the pointer" {
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = L.Builder{ .allocator = arena.allocator() };
+    var dock = DockSpace.init();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 1000, .h = 600 };
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .center);
+    try dock.add(3, 1, .center);
+    try dock.add(4, 1, .right);
+    // Tabs learn where they are when drawn.
+    const root = try dock.build(b, .main, viewport, TestProvider{});
+    root.layout(viewport, &font);
+    var vertices: [20000]@import("types.zig").Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    try root.draw(&canvas);
+    const left = dock.nodeOf(1).?;
+    const spans = dock.nodes[left].tab_spans;
+    // Drag the first tab past the last one: 1 2 3 -> 2 3 1.
+    try std.testing.expect(dock.press(tab_first + 1, spans[0][0] + 5, 15));
+    dock.dragTo(spans[2][1] - 2, 15);
+    try std.testing.expectEqual(@as(?u8, 3), dock.drag.tab.target.?.node.slot);
+    dock.release(spans[2][1] - 2, 15);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 3, 1 }, dock.nodes[left].panels[0..3]);
+    // A tab from another stack lands in the middle: 2 4 3 1.
+    try std.testing.expect(dock.press(tab_first + 4, 600, 15));
+    dock.dragTo((spans[0][1] + spans[1][1]) / 2 - 10, 15);
+    dock.release((spans[0][1] + spans[1][1]) / 2 - 10, 15);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 4, 3, 1 }, dock.nodes[dock.nodeOf(2).?].panels[0..4]);
+}
+
+test "middle-clicking a tab closes its panel" {
+    var dock = DockSpace.init();
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .center);
+    try std.testing.expect(dock.closeTab(tab_first + 2));
+    try std.testing.expect(dock.nodeOf(2) == null and dock.nodeOf(1) != null);
+    try std.testing.expect(!dock.closeTab(menu_first));
+}
+
+test "the stack menu closes a panel, and add brings it back" {
+    var dock = DockSpace.init();
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .right);
+    const right = dock.nodeOf(2).?;
+    try std.testing.expect(dock.activate(menu_first + right));
+    try std.testing.expect(dock.activate(menu_item_first + @as(u32, right) * 4 + 3));
+    try std.testing.expect(dock.nodeOf(2) == null and dock.menu == none);
+    try dock.add(2, null, .center);
+    try std.testing.expect(dock.nodeOf(2) != null);
 }

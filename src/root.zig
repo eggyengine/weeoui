@@ -4,6 +4,7 @@ pub const Color = types.Color;
 pub const Vertex = types.Vertex;
 pub const Rect = types.Rect;
 pub const Vec2 = types.Vec2;
+pub const TextSelection = types.TextSelection;
 pub const Theme = types.Theme;
 pub const Cursor = @import("input.zig").Cursor;
 pub const linearChannel = types.linearChannel;
@@ -33,6 +34,8 @@ pub const accessibility = @import("accessibility.zig");
 pub const accesskit = @import("accesskit.zig");
 pub const widgets = @import("widgets.zig");
 pub const devtools = @import("devtools.zig");
+/// Browser builds: emoji from the page's text stack, and the system clipboard.
+pub const web = @import("web.zig");
 pub const dock = @import("dock.zig");
 pub const titlebar = @import("titlebar.zig");
 pub const Input = @import("components/primitives.zig").Input;

@@ -66,6 +66,19 @@ pub const Context = struct {
     released: u32 = 0,
     /// Scroll area being dragged by its bar, or panned by a swipe.
     scroll_drag: ?struct { state: *L.ScrollState, bar: bool, last: Vec2 } = null,
+    /// How fast the swipe was moving (units per second, measured per frame) and where it was
+    /// when `time_ms` last changed, so letting go flings the content on.
+    swipe_velocity: Vec2 = .zero,
+    swipe_sample: struct { at: Vec2 = .zero, ms: u64 = 0 } = .{},
+    /// Scroll area still gliding after a fling; `render` moves it on.
+    flinging: ?*L.ScrollState = null,
+    last_render_ms: u64 = 0,
+    /// Text a field asked to put on the clipboard (Ctrl+C or Ctrl+X) this frame, for the backend.
+    copied: ?[]const u8 = null,
+    /// A field asked for the clipboard's text (Ctrl+V); the backend answers with a `.text` event.
+    paste_requested: bool = false,
+    /// Where this frame's text fields are, for backends that must open a phone keyboard over them.
+    text_fields: std.ArrayList(Rect) = .empty,
     /// Scroll positions of widgets that scroll themselves (tab bars), by widget id.
     scroll_states: std.AutoHashMapUnmanaged(u32, *L.ScrollState) = .empty,
     viewport: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -144,8 +157,12 @@ pub const Context = struct {
                 self.pointer = p;
                 if (self.scroll_drag) |*drag| {
                     if (drag.bar) drag.state.pointerMove(p.x, p.y) else {
-                        drag.state.offset = drag.state.offset.sub(p.sub(drag.last));
-                        drag.state.clamp();
+                        drag.state.pan(p.sub(drag.last));
+                        if (self.time_ms > self.swipe_sample.ms) {
+                            const seconds = @as(f32, @floatFromInt(self.time_ms - self.swipe_sample.ms)) / 1000;
+                            self.swipe_velocity = p.sub(self.swipe_sample.at).scale(1 / seconds);
+                            self.swipe_sample = .{ .at = p, .ms = self.time_ms };
+                        }
                     }
                     drag.last = p;
                 } else if (self.press) |press| {
@@ -156,6 +173,8 @@ pub const Context = struct {
                         const axis: L.ScrollState.Axis = if (@abs(moved.x) > @abs(moved.y)) .horizontal else .vertical;
                         if (self.last_root) |root| if (scrollable(root, press.at.x, press.at.y, axis)) |state| {
                             self.scroll_drag = .{ .state = state, .bar = false, .last = press.at };
+                            self.swipe_velocity = .zero;
+                            self.swipe_sample = .{ .at = press.at, .ms = self.time_ms };
                             self.press = null;
                             self.handle(event);
                         };
@@ -169,6 +188,9 @@ pub const Context = struct {
                 self.pressed_down = true;
                 self.pointer_held = true;
                 self.press = .{ .at = down.position, .widget = self.hoveredWidget() };
+                // A new touch catches gliding content.
+                if (self.flinging) |state| state.velocity = .zero;
+                self.flinging = null;
                 if (self.last_root) |root| if (root.scrollAt(down.position.x, down.position.y)) |state| {
                     if (state.pointerDown(down.position.x, down.position.y)) {
                         self.scroll_drag = .{ .state = state, .bar = true, .last = down.position };
@@ -186,7 +208,13 @@ pub const Context = struct {
                 self.pointer_held = false;
                 self.released = self.active;
                 self.active = 0;
-                if (self.scroll_drag) |drag| if (drag.bar) drag.state.pointerUp();
+                if (self.scroll_drag) |drag| {
+                    if (drag.bar) drag.state.pointerUp() else if (self.time_ms -| self.swipe_sample.ms < 100) {
+                        // Still moving when the finger lifted: let it glide.
+                        drag.state.fling(self.swipe_velocity);
+                        self.flinging = drag.state;
+                    }
+                }
                 self.scroll_drag = null;
             },
             .wheel => |wheel| if (self.last_root) |root| {
@@ -237,6 +265,8 @@ pub const Context = struct {
         self.stack = .empty;
         self.err = null;
         self.wants_text = false;
+        self.text_fields = .empty;
+        self.copied = null;
         self.last_added = null;
         self.push(.{ .kind = .column, .id = 0 });
     }
@@ -410,7 +440,9 @@ pub const Context = struct {
         const widget = self.focusable(value_label);
         const changed = self.pressed(widget);
         if (changed) value.* = !value.*;
-        self.add(widget, .{ .height = 32 }, .{ .toggle = .{ .label = visible(value_label), .enabled = value.* } }, &.{});
+        const shown = visible(value_label);
+        // Room for the label and the 40-wide switch, so it doesn't collapse inside a row.
+        self.add(widget, .{ .height = 32, .min_width = self.font.measure(shown, self.theme.text_size) + 56 }, .{ .toggle = .{ .label = shown, .enabled = value.* } }, &.{});
         return changed;
     }
 
@@ -520,6 +552,7 @@ pub const Context = struct {
         const size = self.theme.text_size;
         const before_len = edit.len;
         const before_hash = std.hash.Wyhash.hash(0, edit.text());
+        if (self.last_bounds.get(widget)) |target| self.text_fields.append(self.arena.allocator(), target.rect) catch {};
         if (self.focus == widget) {
             self.wants_text = true;
             if (self.clicked and self.hoveredWidget() == widget) if (self.last_bounds.get(widget)) |target| {
@@ -531,13 +564,28 @@ pub const Context = struct {
                     const word = key.modifiers.control or key.modifiers.alt;
                     const shift = key.modifiers.shift;
                     switch (key.key) {
-                        .backspace => edit.backspace(),
-                        .delete => edit.delete(),
+                        // With Ctrl or Alt, the whole word beside the caret.
+                        .backspace => {
+                            if (word and edit.selection() == null) edit.moveLeft(true, true);
+                            edit.backspace();
+                        },
+                        .delete => {
+                            if (word and edit.selection() == null) edit.moveRight(true, true);
+                            edit.delete();
+                        },
                         .left => edit.moveLeft(shift, word),
                         .right => edit.moveRight(shift, word),
                         .home => edit.moveHome(shift),
                         .end => edit.moveEnd(shift),
                         .a => if (key.modifiers.control or key.modifiers.super) edit.selectAll(),
+                        // The backend owns the clipboard: hand it the text, or ask it for some.
+                        .c, .x => if (key.modifiers.control or key.modifiers.super) if (edit.selection()) |range| {
+                            self.copied = self.arena.allocator().dupe(u8, edit.text()[range.start..range.end]) catch null;
+                            if (key.key == .x) edit.backspace();
+                        },
+                        .v => if (key.modifiers.control or key.modifiers.super) {
+                            self.paste_requested = true;
+                        },
                         .z => if (key.modifiers.control or key.modifiers.super) {
                             _ = if (shift) edit.redo() else edit.undo();
                         },
@@ -625,6 +673,11 @@ pub const Context = struct {
         }
         if (self.err) |e| return e;
         std.debug.assert(self.stack.items.len == 1); // missing `end`
+        if (self.flinging) |state| {
+            state.tick(@as(f32, @floatFromInt(self.time_ms -| self.last_render_ms)) / 1000);
+            if (state.velocity.x == 0 and state.velocity.y == 0) self.flinging = null;
+        }
+        self.last_render_ms = self.time_ms;
         const b = self.builder();
         const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 16 }, .gap = 12, .overflow = .scroll }, .none, self.stack.items[0].children.items);
         root.scroll = &self.scroll;
@@ -957,6 +1010,20 @@ test "slider drags, select picks, text input types, radio selects, dialog closes
     ctx.handle(.{ .key_down = .{ .key = .backspace, .modifiers = .{}, .repeat = false } });
     try State.frame(&ctx, viewport, &s);
     try std.testing.expectEqualStrings("Egg", s.name.text());
+    // Alt (or Ctrl) with Backspace takes the whole word before the caret.
+    ctx.handle(.{ .text = " laid today" });
+    ctx.handle(.{ .key_down = .{ .key = .backspace, .modifiers = .{ .alt = true }, .repeat = false } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqualStrings("Egg laid ", s.name.text());
+    // Ctrl+A, Ctrl+X hands the text to the backend and empties the field; Ctrl+V asks for it back.
+    ctx.handle(.{ .key_down = .{ .key = .a, .modifiers = .{ .control = true }, .repeat = false } });
+    ctx.handle(.{ .key_down = .{ .key = .x, .modifiers = .{ .control = true }, .repeat = false } });
+    ctx.handle(.{ .key_down = .{ .key = .v, .modifiers = .{ .control = true }, .repeat = false } });
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqualStrings("Egg laid ", ctx.copied.?);
+    try std.testing.expectEqualStrings("", s.name.text());
+    try std.testing.expect(ctx.paste_requested);
+    try std.testing.expect(ctx.text_fields.items.len > 0);
 
     // Clicking the second radio's label selects it.
     tap(&ctx, at.center(&ctx, ids[4]));
@@ -1015,4 +1082,46 @@ test "a swipe that starts on a button scrolls the page instead of clicking" {
     tap(&ctx, ctx.last_bounds.get(ctx.last_focusables.items[0]).?.rect.center());
     try Page.frame(&ctx, viewport, &clicks);
     try std.testing.expectEqual(@as(u32, 1), clicks);
+}
+
+test "a quick swipe keeps the page gliding after the finger lifts" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 300, .h = 200 };
+    const Page = struct {
+        fn frame(c: *Context, v: Rect, ms: u64) !void {
+            c.newFrame(v);
+            c.time_ms = ms;
+            for (0..80) |i| c.label("Row {d}", .{i});
+            _ = try c.render();
+        }
+    };
+    try Page.frame(&ctx, viewport, 0);
+    // 60 units up in 16 ms frames, then let go.
+    ctx.handle(.{ .pointer_down = .{ .position = Vec2.init(150, 150), .button = .left, .clicks = 1 } });
+    try Page.frame(&ctx, viewport, 16);
+    ctx.handle(.{ .pointer_move = Vec2.init(150, 120) });
+    try Page.frame(&ctx, viewport, 32);
+    ctx.handle(.{ .pointer_move = Vec2.init(150, 90) });
+    ctx.handle(.{ .pointer_up = .{ .position = Vec2.init(150, 90), .button = .left } });
+    const lifted = ctx.scroll.offset.y;
+    try Page.frame(&ctx, viewport, 48);
+    try Page.frame(&ctx, viewport, 64);
+    try std.testing.expect(ctx.scroll.offset.y > lifted + 20);
+}
+
+test "a toggle in a row keeps room for its label and switch" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    var on = true;
+    for (0..2) |_| {
+        ctx.newFrame(.{ .x = 0, .y = 0, .w = 400, .h = 200 });
+        ctx.begin(.row);
+        _ = ctx.toggle("Henrietta##hen0", &on);
+        ctx.badge("Silkie", .secondary);
+        ctx.end();
+        _ = try ctx.render();
+    }
+    const toggle = ctx.last_bounds.get(ctx.last_focusables.items[0]).?.rect;
+    try std.testing.expect(toggle.w >= ctx.font.measure("Henrietta", ctx.theme.text_size) + 40);
 }

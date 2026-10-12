@@ -23,6 +23,8 @@ pub const Canvas = struct {
     focus_id: u32 = 0,
     /// Element id under the pointer, painted in its hover state; 0 for none.
     hot_id: u32 = 0,
+    /// Highlighted static text, painted behind the glyphs. Null (the default) for none.
+    text_selection: ?types.TextSelection = null,
 
     pub fn init(vertices: []Vertex, font: *const Font) Canvas {
         return .{ .vertices = vertices, .font = font };

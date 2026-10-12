@@ -28,6 +28,15 @@ pub const MenuItem = struct {
     items: []const MenuItem = &.{},
 };
 
+/// Whether `entry` is open when `open_submenu` is the deepest open submenu: it is that one,
+/// or one of its descendants is, so nested submenus open along the whole path.
+pub fn submenuOpen(entry: MenuItem, open_submenu: u32) bool {
+    if (entry.kind != .submenu or open_submenu == 0) return false;
+    if (entry.id == open_submenu) return true;
+    for (entry.items) |child| if (submenuOpen(child, open_submenu)) return true;
+    return false;
+}
+
 /// Place `popup` over the page next to `anchor` (below, or to the right for submenus).
 pub fn anchorTo(popup: *L.Element, anchor: *const L.Element, side: @FieldType(@FieldType(L.Overlay, "anchor"), "side"), z_index: i16) *L.Element {
     popup.style.z_index = z_index;
@@ -171,9 +180,9 @@ pub fn menuItems(b: L.Builder, items: []const MenuItem, highlighted_id: u32, ope
             .heading = entry.kind == .label,
         } }, &.{});
         row.accessibility.disabled = entry.disabled;
-        if (entry.kind == .submenu) row.accessibility.expanded = entry.id == open_submenu;
+        if (entry.kind == .submenu) row.accessibility.expanded = submenuOpen(entry, open_submenu);
         try children.append(b.allocator, row);
-        if (entry.kind == .submenu and entry.id == open_submenu and entry.id != 0) {
+        if (entry.id != 0 and submenuOpen(entry, open_submenu)) {
             const sub = try menuItems(b, entry.items, highlighted_id, open_submenu);
             try children.append(b.allocator, anchorTo(sub, row, .right, 150));
         }
@@ -195,21 +204,52 @@ pub fn contextMenu(b: L.Builder, point: ?@import("types.zig").Vec2, choices: []c
     return popup;
 }
 
-pub const MenubarMenu = struct { id: u32, label: []const u8, items: []const MenuItem };
+/// A top-level menu. With `icon` its trigger shows just the icon and `label` is for screen readers.
+pub const MenubarMenu = struct { id: u32, label: []const u8, items: []const MenuItem, icon: ?Icon = null };
 
 /// Desktop-style menu bar. `open_id` is the open menu's trigger id (0 when closed).
 pub fn menubar(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlighted_id: u32, open_submenu: u32) !*L.Element {
+    return menubarWith(b, menus, open_id, highlighted_id, open_submenu, .card);
+}
+
+/// Height of `windowMenubar`.
+pub const window_menubar_height: f32 = 32;
+
+/// `menubar` flush with the window's top edge, as an app's main menu: a full-width strip of
+/// `window_menubar_height` instead of a card. Set the result's `style.width` to the window's.
+pub fn windowMenubar(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlighted_id: u32, open_submenu: u32) !*L.Element {
+    return menubarWith(b, menus, open_id, highlighted_id, open_submenu, .window);
+}
+
+/// `menubar` as bare triggers for `titlebar.barWithMenus`, sharing the row with the window buttons.
+pub fn titlebarMenubar(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlighted_id: u32, open_submenu: u32) !*L.Element {
+    return menubarWith(b, menus, open_id, highlighted_id, open_submenu, .titlebar);
+}
+
+fn menubarWith(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlighted_id: u32, open_submenu: u32, placement: enum { card, window, titlebar }) !*L.Element {
+    const flush = placement != .card;
     var children: std.ArrayList(*L.Element) = .empty;
     defer children.deinit(b.allocator);
     for (menus) |entry| {
-        const trigger = try b.node(entry.id, .{ .height = 30 }, .{ .button = .{ .label = entry.label, .variant = .ghost, .hot = entry.id == open_id } }, &.{});
+        const trigger_height: f32 = if (flush) window_menubar_height - 6 else 30;
+        const trigger = if (entry.icon) |icon|
+            try b.node(entry.id, .{ .width = trigger_height, .height = trigger_height, .padding = .{ .left = 5, .right = 5, .top = 5, .bottom = 5 } }, .{ .button = .{ .label = "", .variant = .ghost, .hot = entry.id == open_id } }, &.{try b.node(0, .{ .width = 16, .height = 16 }, .{ .icon = icon }, &.{})})
+        else
+            try b.node(entry.id, .{ .height = trigger_height }, .{ .button = .{ .label = entry.label, .variant = .ghost, .hot = entry.id == open_id } }, &.{});
         trigger.accessibility = .{ .role = .button, .label = entry.label, .expanded = entry.id == open_id };
         try children.append(b.allocator, trigger);
         if (entry.id == open_id) try children.append(b.allocator, anchorTo(try menuItems(b, entry.items, highlighted_id, open_submenu), trigger, .bottom, 100));
     }
-    const bar = try b.node(0, .{ .direction = .row, .gap = 2, .height = 40, .align_items = .center, .padding = .{ .left = 4, .right = 4 } }, .{ .surface = .card }, children.items);
+    const bar = if (placement == .titlebar)
+        try b.node(0, .{ .direction = .row, .gap = 0, .align_items = .center, .padding = .{ .left = 3, .right = 3 } }, .none, children.items)
+    else if (flush)
+        try b.node(0, .{ .direction = .row, .grow = 1, .gap = 0, .height = window_menubar_height, .align_items = .center, .padding = .{ .left = 3, .right = 3 } }, .{ .surface = .track }, children.items)
+    else
+        // Wraps onto a second line on narrow screens rather than spilling out.
+        try b.node(0, .{ .direction = .row, .gap = 2, .min_height = 40, .wrap = true, .align_items = .center, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 } }, .{ .surface = .card }, children.items);
     bar.accessibility.role = .menu;
-    return b.node(0, .{ .direction = .row }, .none, &.{bar});
+    // A column hands the bar the space it has, so a long one wraps; `.start` keeps it hugging its menus.
+    return b.node(0, if (flush) .{ .direction = .row } else .{ .align_items = .start }, .none, &.{bar});
 }
 
 pub const NavigationLink = struct { id: u32, title: []const u8, description: []const u8 = "" };
