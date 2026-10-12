@@ -54,10 +54,12 @@ pub fn build(b: *std.Build) void {
     // projects that depend on it, so ones without SDL never fetch it. `addApp` turns both on.
     const root_project = b.pkg_hash.len == 0;
     if (b.option(bool, "sdl3", "Provide the weeoui_sdl3 input adapter module") orelse root_project) {
+        // SDL 3.4.0's Wayland pointer-leave handler shifts by -1 (`SDL_BUTTON_MASK(0)`), so UBSan
+        // traps whenever the pointer leaves with a button held, e.g. dragging the title bar.
         const sdl3_lazy = if (emscripten) |em|
-            b.lazyDependency("sdl3", .{ .target = target, .optimize = optimize, .sdl_system_include_path = em.include })
+            b.lazyDependency("sdl3", .{ .target = target, .optimize = optimize, .c_sdl_sanitize_c = .off, .sdl_system_include_path = em.include })
         else
-            b.lazyDependency("sdl3", .{ .target = target, .optimize = optimize });
+            b.lazyDependency("sdl3", .{ .target = target, .optimize = optimize, .c_sdl_sanitize_c = .off });
         if (sdl3_lazy) |sdl3| {
             sdl3_dep = sdl3;
             adapter = b.addModule("weeoui_sdl3", .{
