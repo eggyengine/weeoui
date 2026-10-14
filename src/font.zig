@@ -89,6 +89,9 @@ const Dynamic = struct {
     emoji_face: ?c.FT_Face = null,
     emoji_bytes: ?[]u8 = null,
     glyphs: std.AutoHashMapUnmanaged(u64, Glyph) = .empty,
+    /// Whose atlas this face draws into: itself, or the owner of a companion font (see
+    /// `Font.initCompanion`), whose shelves, version and full warning it then uses.
+    atlas: *Dynamic = undefined,
     shelf: Shelf,
     color_shelf: Shelf = .{ .width = color_atlas_size, .height = color_atlas_size },
     /// Bumped whenever either atlas gains pixels; renderers re-upload when it changes.
@@ -140,6 +143,10 @@ pub const Font = struct {
     dpi_scale: f32 = 1,
     platform: ?PlatformRenderer = null,
     dynamic: *Dynamic,
+    /// How many of `strikes` hold sizes; a companion font has only those it was given.
+    strike_count: usize = strike_sizes.len,
+    /// Whether `pixels` and `color_pixels` are this font's, not a companion's borrowed atlas.
+    owns_atlas: bool = true,
 
     /// Rasterize printable ASCII from TTF/OTF `bytes`; other characters load on first use,
     /// so `bytes` must outlive the font (embedded fonts always do).
@@ -148,6 +155,7 @@ pub const Font = struct {
         const dynamic = try allocator.create(Dynamic);
         errdefer allocator.destroy(dynamic);
         dynamic.* = .{ .library = undefined, .face = undefined, .shelf = .{ .width = atlas_width, .height = atlas_height } };
+        dynamic.atlas = dynamic;
         if (c.FT_Init_FreeType(&dynamic.library) != 0) return error.FreeTypeInitFailed;
         errdefer _ = c.FT_Done_FreeType(dynamic.library);
         if (c.FT_New_Memory_Face(dynamic.library, bytes.ptr, @intCast(bytes.len), 0, &dynamic.face) != 0) return error.InvalidFont;
@@ -195,6 +203,47 @@ pub const Font = struct {
         return font;
     }
 
+    /// A second typeface that draws into `owner`'s atlas, so one renderer draws text in both,
+    /// such as a monospace face for code beside the UI's. ASCII is rasterized up front at `sizes`
+    /// (pixel sizes, ascending) only, and other sizes snap to the nearest of them; other
+    /// characters load on first use, into the owner's atlas. `bytes` and `owner` must outlive
+    /// it, and it must be deinitialized first. To draw with it, set `Canvas.font` to it.
+    pub fn initCompanion(allocator: std.mem.Allocator, bytes: []const u8, owner: *Font, sizes: []const u8) !Font {
+        if (bytes.len == 0) return error.InvalidFont;
+        if (sizes.len == 0 or sizes.len > strike_sizes.len) return error.InvalidFontSize;
+        const dynamic = try allocator.create(Dynamic);
+        errdefer allocator.destroy(dynamic);
+        dynamic.* = .{ .library = undefined, .face = undefined, .shelf = undefined, .atlas = owner.dynamic.atlas };
+        if (c.FT_Init_FreeType(&dynamic.library) != 0) return error.FreeTypeInitFailed;
+        errdefer _ = c.FT_Done_FreeType(dynamic.library);
+        if (c.FT_New_Memory_Face(dynamic.library, bytes.ptr, @intCast(bytes.len), 0, &dynamic.face) != 0) return error.InvalidFont;
+        errdefer _ = c.FT_Done_Face(dynamic.face);
+
+        // Shapes (corners, icons, the white texel) sample the shared atlas, so reuse the owner's.
+        var font = Font{
+            .allocator = allocator,
+            .pixels = owner.pixels,
+            .color_pixels = owner.color_pixels,
+            .icons = owner.icons,
+            .corner = owner.corner,
+            .dpi_scale = owner.dpi_scale,
+            .dynamic = dynamic,
+            .strike_count = sizes.len,
+            .owns_atlas = false,
+        };
+        for (sizes, 0..) |strike_size, strike_index| {
+            if (c.FT_Set_Pixel_Sizes(dynamic.face, 0, strike_size) != 0) return error.InvalidFontSize;
+            font.strikes[strike_index].size = @floatFromInt(strike_size);
+            font.strikes[strike_index].ascent = @floatFromInt(dynamic.face.*.size.*.metrics.ascender >> 6);
+            for (32..127) |codepoint| {
+                if (c.FT_Load_Char(dynamic.face, @intCast(codepoint), c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_LIGHT) != 0) return error.GlyphLoadFailed;
+                font.strikes[strike_index].glyphs[codepoint - 32] = try font.packGray(dynamic.face.*.glyph);
+            }
+        }
+        dynamic.atlas.version +%= 1;
+        return font;
+    }
+
     pub fn deinit(self: *Font) void {
         const dynamic = self.dynamic;
         if (dynamic.emoji_face) |face| _ = c.FT_Done_Face(face);
@@ -203,6 +252,7 @@ pub const Font = struct {
         _ = c.FT_Done_FreeType(dynamic.library);
         dynamic.glyphs.deinit(self.allocator);
         self.allocator.destroy(dynamic);
+        if (!self.owns_atlas) return;
         self.allocator.free(self.color_pixels);
         self.allocator.free(self.pixels);
     }
@@ -235,7 +285,7 @@ pub const Font = struct {
 
     /// Current atlas contents version; see `pixels` and `color_pixels`.
     pub fn version(self: *const Font) u32 {
-        return self.dynamic.version;
+        return self.dynamic.atlas.version;
     }
 
     fn packGray(self: *const Font, slot: c.FT_GlyphSlot) !Glyph {
@@ -243,7 +293,7 @@ pub const Font = struct {
         const w: usize = @intCast(bitmap.width);
         const h: usize = @intCast(bitmap.rows);
         if (bitmap.pixel_mode != c.FT_PIXEL_MODE_GRAY and w * h != 0) return error.UnsupportedGlyphBitmap;
-        const at = self.dynamic.shelf.place(w, h) orelse return error.AtlasFull;
+        const at = self.dynamic.atlas.shelf.place(w, h) orelse return error.AtlasFull;
         copyGray(self.pixels, atlas_width, at, bitmap);
         return .{
             .x = @intCast(at[0]),
@@ -264,7 +314,7 @@ pub const Font = struct {
         const sh: usize = @intCast(bitmap.rows);
         const w: usize = @max(1, @as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(sw)) * scale))));
         const h: usize = @max(1, @as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(sh)) * scale))));
-        const at = self.dynamic.color_shelf.place(w, h) orelse return error.AtlasFull;
+        const at = self.dynamic.atlas.color_shelf.place(w, h) orelse return error.AtlasFull;
         const source: [*]const u8 = @ptrCast(bitmap.buffer);
         const pitch: usize = @intCast(@abs(bitmap.pitch));
         for (0..h) |y| for (0..w) |x| {
@@ -309,14 +359,14 @@ pub const Font = struct {
     // ponytail: atlas space is never reclaimed, so sprites live as long as the font; give images their own textures if apps churn through many.
     pub fn addSprite(self: *Font, pixels: []const u8, width: u16, height: u16) !Glyph {
         const sprite = try self.packRgba(pixels, width, height);
-        self.dynamic.version +%= 1;
+        self.dynamic.atlas.version +%= 1;
         return sprite;
     }
 
     fn packRgba(self: *const Font, pixels: []const u8, width: u16, height: u16) !Glyph {
         const row = @as(usize, width) * 4;
         if (pixels.len != row * height) return error.InvalidImageSize;
-        const at = self.dynamic.color_shelf.place(width, height) orelse return error.AtlasFull;
+        const at = self.dynamic.atlas.color_shelf.place(width, height) orelse return error.AtlasFull;
         for (0..height) |y| @memcpy(self.color_pixels[((at[1] + y) * color_atlas_size + at[0]) * 4 ..][0..row], pixels[y * row ..][0..row]);
         return .{ .x = @intCast(at[0]), .y = @intCast(at[1]), .w = width, .h = height, .color = true };
     }
@@ -370,14 +420,14 @@ pub const Font = struct {
         if (d.glyphs.get(key)) |g| return g;
         // A failed lookup is cached as '?' so a missing character costs one FreeType call.
         const g = self.rasterize(selected, cp) catch |err| blk: {
-            if (err == error.AtlasFull and !d.full_reported) {
-                d.full_reported = true;
+            if (err == error.AtlasFull and !d.atlas.full_reported) {
+                d.atlas.full_reported = true;
                 log.warn("glyph atlas is full; new characters draw as '?'", .{});
             }
             break :blk selected.glyph('?');
         };
         d.glyphs.put(self.allocator, key, g) catch return g;
-        if (g.w > 0 and !std.meta.eql(g, selected.glyph('?'))) d.version +%= 1;
+        if (g.w > 0 and !std.meta.eql(g, selected.glyph('?'))) d.atlas.version +%= 1;
         return g;
     }
 
@@ -389,7 +439,7 @@ pub const Font = struct {
     }
     pub fn strike(self: *const Font, requested_size: f32) *const Strike {
         var best: usize = 0;
-        for (1..self.strikes.len) |i| {
+        for (1..self.strike_count) |i| {
             if (@abs(self.strikes[i].size - requested_size * self.dpi_scale) < @abs(self.strikes[best].size - requested_size * self.dpi_scale)) best = i;
         }
         return &self.strikes[best];
@@ -525,4 +575,28 @@ test "system color emoji rasterize into the color atlas when installed" {
         if (font.color_pixels[((@as(usize, g.y) + y) * color_atlas_size + g.x + x) * 4 + 3] > 200) opaque_texel = true;
     };
     try std.testing.expect(opaque_texel);
+}
+
+test "a companion font draws into its owner's atlas and snaps to its own sizes" {
+    var owner = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer owner.deinit();
+    const before = owner.version();
+    // A second face (here the same file) at three sizes only.
+    var mono = try Font.initCompanion(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), &owner, &.{ 12, 14, 16 });
+    defer mono.deinit();
+    try std.testing.expect(owner.version() != before);
+    try std.testing.expectEqual(owner.pixels.ptr, mono.pixels.ptr);
+    try std.testing.expectEqual(@as(f32, 16), mono.strike(40).size);
+    try std.testing.expectEqual(@as(f32, 12), mono.strike(6).size);
+    // Its glyphs are pixels in the shared atlas, and new ones bump the owner's version.
+    const g = mono.strike(14).glyph('M');
+    var inked = false;
+    for (0..g.h) |y| for (0..g.w) |x| {
+        if (owner.pixels[(@as(usize, g.y) + y) * atlas_width + g.x + x] > 0) inked = true;
+    };
+    try std.testing.expect(inked);
+    const cached = owner.version();
+    try std.testing.expect(mono.measure("\u{e9}", 14) > 0);
+    try std.testing.expect(owner.version() != cached);
+    try std.testing.expectEqual(owner.corner, mono.corner);
 }
