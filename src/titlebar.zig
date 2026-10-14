@@ -16,6 +16,9 @@ pub const Layout = struct {
     left: [3]?Button = @splat(null),
     right: [3]?Button = @splat(null),
     style: Style = .gnome,
+    /// Where the title sits: centred, or at the start of the bar right after the menus and any
+    /// left-hand buttons (as Windows and VS Code put it).
+    title: enum { center, start } = .center,
 
     /// The platform's usual layout, used when the desktop doesn't say otherwise.
     pub fn default(os: std.Target.Os.Tag) Layout {
@@ -86,7 +89,8 @@ pub fn barWithMenus(b: L.Builder, first_id: u32, slot: u32, title: []const u8, l
     } else true;
     if (menus == null or !left_empty) try group(b, &children, layout.left, layout, state, first_id, slot);
     if (menus) |m| try children.append(b.allocator, m);
-    const label = try b.node(0, .{ .grow = 1, .height = height }, .{ .text = .{ .value = title, .size = 13, .tone = if (state.focused) .foreground else .muted, .alignment = .center } }, &.{});
+    const alignment: Canvas.TextAlign = if (layout.title == .start) .start else .center;
+    const label = try b.node(0, .{ .grow = 1, .height = height, .padding = .{ .left = if (layout.title == .start) 12 else 0 } }, .{ .text = .{ .value = title, .size = 13, .tone = if (state.focused) .foreground else .muted, .alignment = alignment } }, &.{});
     label.accessibility.role = .heading;
     try children.append(b.allocator, label);
     try group(b, &children, layout.right, layout, state, first_id, slot);
@@ -256,4 +260,19 @@ test "the bar orders buttons per layout and exposes ids" {
     try std.testing.expect(canvas.len > 0);
     const tweaked = try bar(b, first, 0, "eggy", Layout.parse(":close", .gnome), .{});
     try std.testing.expect(tweaked.find(id(first, 0, .minimize)) == null);
+}
+
+test "the title can sit at the start of the bar instead of its centre" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = L.Builder{ .allocator = arena.allocator() };
+    var layout = Layout.default(.linux);
+    for ([_]@TypeOf(layout.title){ .center, .start }) |title| {
+        layout.title = title;
+        const root = try bar(b, 0xC0FF_0000, 0, "eggy", layout, .{});
+        const label = for (root.children) |child| {
+            if (child.paint_kind == .text) break child;
+        } else return error.NoTitle;
+        try std.testing.expectEqual(@as(Canvas.TextAlign, if (title == .start) .start else .center), label.paint_kind.text.alignment);
+    }
 }
