@@ -25,7 +25,7 @@ const popout_first = first_id + 0x1_0100; // + node
 const dockback_first = first_id + 0x1_0200; // + node
 const grip_first = first_id + 0x1_0300; // + floating index
 const bar_first = first_id + 0x1_0400; // + node
-/// The stack's menu button, and its items: + node * 4 + (pop out, float, dock back).
+/// The stack's menu button: + node. Its items: see `menuItemId`.
 const menu_first = first_id + 0x1_0500;
 const menu_item_first = first_id + 0x1_0600;
 /// Floating windows' close/minimize/maximize: + floating * 3 + `titlebar.Button`.
@@ -34,6 +34,12 @@ const last_id = window_button_first + max_floating * 3;
 /// Whether `id` is one of the dock's own controls (tabs, splitters, window buttons, menus).
 pub fn owns(id: u32) bool {
     return id >= first_id and id < last_id;
+}
+
+/// The items of a tab stack's menu.
+const MenuAction = enum(u2) { pop_out, float, dock_back, close };
+fn menuItemId(stack: Index, action: MenuAction) u32 {
+    return menu_item_first + @as(u32, stack) * 4 + @intFromEnum(action);
 }
 
 const max_nodes = 64;
@@ -456,11 +462,11 @@ pub const DockSpace = struct {
                 self.menu = none;
                 if (node.kind != .tabs or node.count == 0) return true;
                 const panel = node.panels[node.active];
-                switch ((id - menu_item_first) % 4) {
-                    0 => self.detach(panel) catch {},
-                    1 => self.float(panel, self.floatRect(panel, node.rect.x + 40, node.rect.y + 40)) catch {},
-                    2 => self.redock(self.hostOf(index)),
-                    else => self.remove(panel),
+                switch (@as(MenuAction, @enumFromInt((id - menu_item_first) % 4))) {
+                    .pop_out => self.detach(panel) catch {},
+                    .float => self.float(panel, self.floatRect(panel, node.rect.x + 40, node.rect.y + 40)) catch {},
+                    .dock_back => self.redock(self.hostOf(index)),
+                    .close => self.remove(panel),
                 }
             },
             window_button_first...window_button_first + max_floating * 3 - 1 => {
@@ -705,19 +711,19 @@ pub const DockSpace = struct {
                 var items: [4]@import("widgets.zig").MenuItem = undefined;
                 var n: usize = 0;
                 if (host != .window and self.os_windows) {
-                    items[n] = .{ .id = menu_item_first + @as(u32, index) * 4, .label = "Pop out into window" };
+                    items[n] = .{ .id = menuItemId(index, .pop_out), .label = "Pop out into window" };
                     n += 1;
                 }
                 if (host == .main) {
-                    items[n] = .{ .id = menu_item_first + @as(u32, index) * 4 + 1, .label = "Float" };
+                    items[n] = .{ .id = menuItemId(index, .float), .label = "Float" };
                     n += 1;
                 }
                 if (host != .main) {
-                    items[n] = .{ .id = menu_item_first + @as(u32, index) * 4 + 2, .label = "Dock back" };
+                    items[n] = .{ .id = menuItemId(index, .dock_back), .label = "Dock back" };
                     n += 1;
                 }
                 // Apps bring a closed panel back with `add` (the gallery's Windows menu).
-                items[n] = .{ .id = menu_item_first + @as(u32, index) * 4 + 3, .label = "Close" };
+                items[n] = .{ .id = menuItemId(index, .close), .label = "Close" };
                 n += 1;
                 const menu = try @import("widgets.zig").menuItems(b, items[0..n], 0, 0);
                 menu.style.width = 200;
@@ -928,7 +934,7 @@ test "dragging tabs docks on the compass, floats elsewhere and pops out past the
     try std.testing.expect(window.find(menu_first + dock.nodeOf(2).?) != null);
     // "Dock back" from the stack menu.
     try std.testing.expect(dock.activate(menu_first + dock.nodeOf(2).?));
-    try std.testing.expect(dock.activate(menu_item_first + @as(u32, dock.nodeOf(2).?) * 4 + 2));
+    try std.testing.expect(dock.activate(menuItemId(dock.nodeOf(2).?, .dock_back)));
     try std.testing.expect(dock.windows[0] == null and dock.hostOf(dock.nodeOf(2).?) == .main);
 }
 
@@ -952,7 +958,7 @@ test "splitters resize within limits and pop-out floats without OS windows" {
     // The stack menu's first item pops out; without OS windows that floats.
     try std.testing.expect(dock.activate(menu_first + dock.nodeOf(1).?));
     try std.testing.expectEqual(dock.nodeOf(1).?, dock.menu);
-    try std.testing.expect(dock.activate(menu_item_first + @as(u32, dock.nodeOf(1).?) * 4 + 1));
+    try std.testing.expect(dock.activate(menuItemId(dock.nodeOf(1).?, .float)));
     try std.testing.expect(dock.hostOf(dock.nodeOf(1).?) == .floating and dock.menu == none);
     try std.testing.expectError(error.PanelExists, dock.add(2, null, .center));
     // Ids outside the dock's range (another widget's) are left alone.
@@ -1072,7 +1078,7 @@ test "the stack menu closes a panel, and add brings it back" {
     try dock.add(2, 1, .right);
     const right = dock.nodeOf(2).?;
     try std.testing.expect(dock.activate(menu_first + right));
-    try std.testing.expect(dock.activate(menu_item_first + @as(u32, right) * 4 + 3));
+    try std.testing.expect(dock.activate(menuItemId(right, .close)));
     try std.testing.expect(dock.nodeOf(2) == null and dock.menu == none);
     try dock.add(2, null, .center);
     try std.testing.expect(dock.nodeOf(2) != null);
