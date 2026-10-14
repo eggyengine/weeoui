@@ -57,6 +57,8 @@ test {
     _ = @import("dock.zig");
     _ = @import("titlebar.zig");
     _ = @import("layout.zig");
+    _ = @import("flow.zig");
+    _ = @import("text_selection.zig");
     _ = @import("accessibility.zig");
     _ = @import("widgets.zig");
     _ = @import("scroll.zig");
