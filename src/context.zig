@@ -36,7 +36,10 @@ const Target = struct { rect: Rect, z: i16 };
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
-    font: Font,
+    /// Shared with other contexts made by `initWithFont`, so they all draw from one glyph atlas.
+    font: *Font,
+    /// Whether `deinit` frees `font` (`init` made it).
+    owns_font: bool = true,
     theme: types.Theme = .{},
     /// Physical pixels per viewport unit, for crisp edges on HiDPI targets.
     pixel_scale: [2]f32 = .{ 1, 1 },
@@ -132,13 +135,26 @@ pub const Context = struct {
         title: []const u8 = "",
     };
 
+    /// A context with its own font (the default typeface).
     pub fn init(gpa: std.mem.Allocator) !Context {
-        return .{ .gpa = gpa, .font = try Font.init(gpa, @import("root.zig").default_font), .arena = .init(gpa) };
+        const font = try gpa.create(Font);
+        errdefer gpa.destroy(font);
+        font.* = try Font.init(gpa, @import("root.zig").default_font);
+        return .{ .gpa = gpa, .font = font, .arena = .init(gpa) };
+    }
+
+    /// A context that draws with `font`, which must outlive it: several contexts sharing one font
+    /// share one glyph atlas, so a single renderer can draw them all.
+    pub fn initWithFont(gpa: std.mem.Allocator, font: *Font) Context {
+        return .{ .gpa = gpa, .font = font, .owns_font = false, .arena = .init(gpa) };
     }
 
     pub fn deinit(self: *Context) void {
         if (self.accesskit) |adapter| adapter.destroy();
-        self.font.deinit();
+        if (self.owns_font) {
+            self.font.deinit();
+            self.gpa.destroy(self.font);
+        }
         self.arena.deinit();
         self.vertices.deinit(self.gpa);
         self.last_bounds.deinit(self.gpa);
@@ -556,7 +572,7 @@ pub const Context = struct {
         if (self.focus == widget) {
             self.wants_text = true;
             if (self.clicked and self.hoveredWidget() == widget) if (self.last_bounds.get(widget)) |target| {
-                edit.placeCaret(&self.font, size, text_edit.inputContentRect(target.rect), false, self.pointer.x, self.pointer.y, false);
+                edit.placeCaret(self.font, size, text_edit.inputContentRect(target.rect), false, self.pointer.x, self.pointer.y, false);
             };
             for (self.pending.items) |item| switch (item) {
                 .text => |range| _ = edit.insertFitting(self.typed.items[range.start..][0..range.len]) catch false,
@@ -682,7 +698,7 @@ pub const Context = struct {
         const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 16 }, .gap = 12, .overflow = .scroll }, .none, self.stack.items[0].children.items);
         root.scroll = &self.scroll;
         self.scroll.overlay_bar = true;
-        root.layout(self.viewport, &self.font);
+        root.layout(self.viewport, self.font);
         self.last_root = root;
         self.last_bounds.clearRetainingCapacity();
         try self.remember(root, 0);
@@ -699,7 +715,7 @@ pub const Context = struct {
         }
         if (self.vertices.capacity == 0) try self.vertices.ensureTotalCapacity(self.gpa, 4096);
         while (true) {
-            var canvas = Canvas.init(self.vertices.allocatedSlice(), &self.font);
+            var canvas = Canvas.init(self.vertices.allocatedSlice(), self.font);
             canvas.theme = self.theme;
             canvas.pixel_scale = self.pixel_scale;
             canvas.srgb_target = self.srgb_target;
@@ -1124,4 +1140,15 @@ test "a toggle in a row keeps room for its label and switch" {
     }
     const toggle = ctx.last_bounds.get(ctx.last_focusables.items[0]).?.rect;
     try std.testing.expect(toggle.w >= ctx.font.measure("Henrietta", ctx.theme.text_size) + 40);
+}
+
+test "contexts made with initWithFont share the first one's font and leave freeing it to it" {
+    var first = try Context.init(std.testing.allocator);
+    defer first.deinit();
+    var second = Context.initWithFont(std.testing.allocator, first.font);
+    defer second.deinit();
+    try std.testing.expectEqual(first.font, second.font);
+    second.newFrame(.{ .x = 0, .y = 0, .w = 200, .h = 100 });
+    second.label("shared", .{});
+    try std.testing.expect((try second.render()).len > 0);
 }

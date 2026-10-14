@@ -55,7 +55,7 @@ fn frame(d: *Demo, ctx: *ui.Context) !void {
         ctx.theme.primary = d.accent.rgb();
         ctx.theme.ring = d.accent.rgb();
     }
-    if (d.media == null) d.media = try loadMedia(d.gpa, &ctx.font);
+    if (d.media == null) d.media = try loadMedia(d.gpa, ctx.font);
 
     ctx.begin(.row);
     ctx.heading(1, "weeoui");
@@ -332,7 +332,7 @@ test "nothing spills out of its container, from small phones to wide desktops" {
             try frame(&demo, &ctx);
             _ = try ctx.render();
         }
-        const check: Check = .{ .font = &ctx.font, .viewport = viewport };
+        const check: Check = .{ .font = ctx.font, .viewport = viewport };
         check.fits(ctx.last_root.?) catch |err| {
             std.debug.print("page {s} at width {d}\n", .{ pages[page], width });
             return err;

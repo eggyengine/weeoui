@@ -43,7 +43,7 @@ ctx.theme.primary = app.accent.rgb();
 
 ```zig
 // once, after the context exists:
-var egg = try ui.Image.load(gpa, &ctx.font, @embedFile("egg.gif"));
+var egg = try ui.Image.load(gpa, ctx.font, @embedFile("egg.gif"));
 defer egg.deinit(gpa);
 
 // every frame:

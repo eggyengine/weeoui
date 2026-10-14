@@ -98,12 +98,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: RunOptions, state: anyty
         const safe = window.window.getSafeArea() catch null;
         ctx.newFrame(if (safe) |r| .{ .x = @as(f32, @floatFromInt(r.x)) / scale, .y = @as(f32, @floatFromInt(r.y)) / scale, .w = @as(f32, @floatFromInt(r.w)) / scale, .h = @as(f32, @floatFromInt(r.h)) / scale } else viewport);
         if (painter == null) {
-            painter = try Painter.init(gpa, try window.asWindow(), pixels, &ctx.font);
+            painter = try Painter.init(gpa, try window.asWindow(), pixels, ctx.font);
             ctx.srgb_target = painter.?.srgb();
         }
         ctx.time_ms = sdl3.timer.getMillisecondsSinceInit() - start;
         try frame(state, &ctx);
-        try painter.?.paint(pixels, &ctx.font, try ctx.render(), viewport, ctx.theme.background);
+        try painter.?.paint(pixels, ctx.font, try ctx.render(), viewport, ctx.theme.background);
         // No stuck tooltips or hover colors where a finger was.
         if (finger_lifted) ctx.handle(.{ .pointer_move = Vec2.init(-1, -1) });
         finger_lifted = false;

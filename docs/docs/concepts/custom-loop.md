@@ -51,12 +51,12 @@ The first call to `handleEvent` for a window also connects AccessKit, so screen 
 `Painter` owns the Vitellus device, the swapchain and the renderer for one window:
 
 ```zig
-var painter = try weeoui_vitellus.Painter.init(gpa, try window.asWindow(), pixel_extent, &ctx.font);
+var painter = try weeoui_vitellus.Painter.init(gpa, try window.asWindow(), pixel_extent, ctx.font);
 defer painter.deinit();
 ctx.srgb_target = painter.srgb();
 
 // every frame, after ctx.render():
-try painter.paint(pixel_extent, &ctx.font, vertices, viewport, ctx.theme.background);
+try painter.paint(pixel_extent, ctx.font, vertices, viewport, ctx.theme.background);
 ```
 
 `paint` resizes the swapchain when `pixel_extent` changes. It keeps `weeoui_vitellus.frames_in_flight` (2) frames in flight, so the CPU builds the next frame while the GPU draws the last one.
@@ -66,12 +66,12 @@ try painter.paint(pixel_extent, &ctx.font, vertices, viewport, ctx.theme.backgro
 If you already have a Vitellus device and frame loop, which is how Eggy uses Weeoui, use `Renderer` directly and record the UI into your own command buffer:
 
 ```zig
-var renderer = try weeoui_vitellus.Renderer.init(device, color_format, &ctx.font);
+var renderer = try weeoui_vitellus.Renderer.init(device, color_format, ctx.font);
 defer renderer.deinit();
 ctx.srgb_target = weeoui_vitellus.isSrgb(color_format);
 
 // each frame, outside a render pass:
-try renderer.upload(cmd, &ctx.font, vertices, viewport);
+try renderer.upload(cmd, ctx.font, vertices, viewport);
 
 // inside the render pass that targets the swapchain image:
 renderer.draw(cmd, extent, 0, vertices.len);
