@@ -49,6 +49,12 @@ pub const max_windows = 8;
 const splitter: f32 = 6;
 const min_side: f32 = 60;
 const grip: f32 = 14;
+/// A tab or floating window dropped this close to the main window's left or right edge docks
+/// there as a full-height column; this close to a stack's left or right edge, it splits that stack.
+const edge_snap: f32 = 32;
+/// Share of the main window a column docked at its edge takes.
+const edge_share: f32 = 0.25;
+const max_homes = 32;
 
 pub const Side = enum { center, left, right, top, bottom };
 pub const Host = union(enum) { main, floating: u8, window: u8 };
@@ -99,18 +105,32 @@ pub const Target = union(enum) {
     node: struct { index: Index, side: Side, slot: ?u8 = null },
     float: Rect,
     window,
+    /// A full-height column at the main window's left or right edge.
+    edge: Side,
 };
 
 const Drag = union(enum) {
     none,
     split: Index,
-    move: struct { floating: u8, dx: f32, dy: f32 },
+    move: struct { floating: u8, dx: f32, dy: f32, pointer: [2]f32 = .{ 0, 0 } },
     resize: struct { floating: u8, dx: f32, dy: f32 },
     tab: struct { panel: u32, x: f32, y: f32, started: bool = false, target: ?Target = null, pointer: [2]f32 = .{ 0, 0 } },
 };
 
+/// Where a panel sat in the main window before it floated or popped out, so `redock` can put it
+/// back: beside the stack or column holding `neighbours` (with `side` and `ratio` of the split),
+/// or into their stack for `.center`.
+const Home = struct {
+    panel: u32 = 0,
+    side: Side = .center,
+    ratio: f32 = 0.5,
+    neighbours: [max_tabs]u32 = undefined,
+    count: u8 = 0,
+};
+
 pub const DockSpace = struct {
     nodes: [max_nodes]Node = [_]Node{.{}} ** max_nodes,
+    homes: [max_homes]Home = @splat(.{}),
     root: Index = none,
     floating: [max_floating]?Floating = @splat(null),
     windows: [max_windows]?Window = @splat(null),
@@ -187,7 +207,7 @@ pub const DockSpace = struct {
     /// Put `panel` into tab stack `index` (center) or beside it. Returns where the stack's
     /// previous contents ended up (they move when the stack is split).
     fn insert(self: *DockSpace, index: Index, side: Side, panel: u32) !Index {
-        if (side == .center or self.nodes[index].count == 0) {
+        if (side == .center or (self.nodes[index].kind == .tabs and self.nodes[index].count == 0)) {
             const node = &self.nodes[index];
             if (node.count == max_tabs) return error.TooManyTabs;
             node.panels[node.count] = panel;
@@ -200,6 +220,11 @@ pub const DockSpace = struct {
         const added = try self.alloc();
         self.nodes[moved] = self.nodes[index];
         self.nodes[moved].parent = index;
+        // Splitting a split (a whole column) moves its children under the copy.
+        if (self.nodes[moved].kind == .split) {
+            self.nodes[self.nodes[moved].first].parent = moved;
+            self.nodes[self.nodes[moved].second].parent = moved;
+        }
         self.nodes[added] = .{ .kind = .tabs, .parent = index, .count = 1 };
         self.nodes[added].panels[0] = panel;
         const before = side == .left or side == .top;
@@ -297,6 +322,7 @@ pub const DockSpace = struct {
         const slot = for (self.floating, 0..) |f, i| {
             if (f == null) break i;
         } else return error.TooManyFloating;
+        self.rememberHome(panel);
         self.remove(panel);
         self.z_counter += 1;
         self.floating[slot] = .{ .root = try self.newRoot(panel), .rect = rect, .z = self.z_counter };
@@ -313,6 +339,7 @@ pub const DockSpace = struct {
         const slot = for (self.windows, 0..) |w, i| {
             if (w == null) break i;
         } else return error.TooManyWindows;
+        self.rememberHome(panel);
         self.remove(panel);
         self.windows[slot] = .{ .root = try self.newRoot(panel), .size = size };
         log.info("panel {d} popped out into window {d} ({d:.0}x{d:.0})", .{ panel, slot, size[0], size[1] });
@@ -331,8 +358,91 @@ pub const DockSpace = struct {
         log.info("docking {d} panel(s) back from {s}", .{ n, @tagName(host) });
         for (panels[0..n]) |panel| {
             self.remove(panel);
-            self.add(panel, null, .center) catch {};
+            self.dockHome(panel);
         }
+    }
+
+    /// Note where `panel` sits in the main window before it leaves; see `Home`.
+    fn rememberHome(self: *DockSpace, panel: u32) void {
+        const index = self.nodeOf(panel) orelse return;
+        if (self.hostOf(index) != .main) return; // keep the home it left the main window from
+        var home = Home{ .panel = panel };
+        const node = self.nodes[index];
+        if (node.count > 1) {
+            // Tabbed with others: back into their stack.
+            for (node.panels[0..node.count]) |other| if (other != panel) {
+                home.neighbours[home.count] = other;
+                home.count += 1;
+            };
+        } else {
+            // Alone in its stack: back beside whatever shares its split.
+            const parent = node.parent;
+            if (parent == none) return;
+            const split = self.nodes[parent];
+            const first = split.first == index;
+            var panels: [max_nodes * max_tabs]u32 = undefined;
+            const n = self.collect(if (first) split.second else split.first, &panels, 0);
+            home.count = @intCast(@min(n, max_tabs));
+            @memcpy(home.neighbours[0..home.count], panels[0..home.count]);
+            home.side = if (split.vertical) (if (first) .top else .bottom) else (if (first) .left else .right);
+            home.ratio = split.ratio;
+        }
+        if (home.count == 0) return;
+        // Replace this panel's old home, else take a free slot, else the slot its id picks.
+        const slot = for (self.homes, 0..) |entry, i| {
+            if (entry.panel == panel) break i;
+        } else for (self.homes, 0..) |entry, i| {
+            if (entry.panel == 0) break i;
+        } else panel % max_homes;
+        self.homes[slot] = home;
+    }
+
+    /// Put `panel` (already removed) back where `rememberHome` saw it, or into the largest stack
+    /// when its neighbours have all left the main window.
+    fn dockHome(self: *DockSpace, panel: u32) void {
+        const home = for (self.homes) |entry| {
+            if (entry.panel == panel) break entry;
+        } else return self.add(panel, null, .center) catch {};
+        // The smallest part of the main window holding every neighbour still there.
+        var target: ?Index = null;
+        for (home.neighbours[0..home.count]) |neighbour| {
+            const index = self.nodeOf(neighbour) orelse continue;
+            if (self.hostOf(index) != .main) continue;
+            target = if (target) |t| self.commonAncestor(t, index) else index;
+        }
+        const at = target orelse return self.add(panel, null, .center) catch {};
+        if (self.insert(at, home.side, panel)) |_| {
+            if (home.side != .center) self.nodes[at].ratio = home.ratio;
+        } else |_| self.add(panel, null, .center) catch {};
+    }
+
+    fn commonAncestor(self: *const DockSpace, a: Index, b: Index) Index {
+        var ancestors: [max_nodes]Index = undefined;
+        var n: usize = 0;
+        var at = a;
+        while (true) : (at = self.nodes[at].parent) {
+            ancestors[n] = at;
+            n += 1;
+            if (self.nodes[at].parent == none) break;
+        }
+        at = b;
+        while (std.mem.indexOfScalar(Index, ancestors[0..n], at) == null) at = self.nodes[at].parent;
+        return at;
+    }
+
+    /// Dock `panel` as a full-height column at the main window's `side` edge.
+    fn snapToEdge(self: *DockSpace, panel: u32, side: Side) !void {
+        try self.move(panel, self.root, side);
+        if (self.nodes[self.root].kind == .split) self.nodes[self.root].ratio = if (side == .left) edge_share else 1 - edge_share;
+    }
+
+    /// Which edge of the main window (x, y) is close enough to snap to.
+    fn edgeAt(self: *const DockSpace, x: f32, y: f32) ?Side {
+        const v = self.viewport;
+        if (y < v.y or y > v.y + v.h) return null;
+        if (x < v.x + edge_snap) return .left;
+        if (x > v.x + v.w - edge_snap) return .right;
+        return null;
     }
     fn collect(self: *const DockSpace, index: Index, out: []u32, start: usize) usize {
         const node = self.nodes[index];
@@ -516,7 +626,8 @@ pub const DockSpace = struct {
                 const at = if (node.vertical) y - r.y else x - r.x;
                 node.ratio = std.math.clamp((at - splitter / 2) / total, 0.05, 0.95);
             },
-            .move => |m| {
+            .move => |*m| {
+                m.pointer = .{ x, y };
                 const f = &(self.floating[m.floating] orelse return);
                 f.rect.x = x - m.dx;
                 f.rect.y = y - m.dy;
@@ -550,7 +661,17 @@ pub const DockSpace = struct {
                     },
                     .float => |r| self.float(t.panel, r) catch {},
                     .window => self.detach(t.panel) catch {},
+                    .edge => |side| self.snapToEdge(t.panel, side) catch |err| log.warn("cannot dock panel {d} at the {s} edge: {s}", .{ t.panel, @tagName(side), @errorName(err) }),
                 }
+            },
+            // A floating window let go at the main window's edge docks there, every tab with it.
+            .move => |m| if (self.edgeAt(x, y)) |side| {
+                const f = self.floating[m.floating] orelse return;
+                var panels: [max_nodes * max_tabs]u32 = undefined;
+                const n = self.collect(f.root, &panels, 0);
+                if (n == 0) return;
+                self.snapToEdge(panels[0], side) catch return;
+                for (panels[1..n]) |panel| self.move(panel, self.nodeOf(panels[0]).?, .center) catch {};
             },
             else => {},
         }
@@ -602,6 +723,10 @@ pub const DockSpace = struct {
             // Dropping onto a tab bar joins that stack, between the tabs under the pointer.
             const r = self.nodes[index].rect;
             if (y < r.y + self.tab_height and y >= r.y) return .{ .node = .{ .index = index, .side = .center, .slot = self.slotAt(index, x) } };
+            // Near the main window's edge, a full-height column; near the stack's, half of it.
+            if (self.edgeAt(x, y)) |side| return .{ .edge = side };
+            if (x < r.x + edge_snap) return .{ .node = .{ .index = index, .side = .left } };
+            if (x > r.x + r.w - edge_snap) return .{ .node = .{ .index = index, .side = .right } };
         }
         return .{ .float = self.floatRect(panel, x, y) };
     }
@@ -622,9 +747,11 @@ pub const DockSpace = struct {
 
     /// Area a drop on `target` would give the panel, for the preview.
     fn previewRect(self: *const DockSpace, target: Target) ?Rect {
+        const v = self.viewport;
         return switch (target) {
             .window => null,
             .float => |r| r,
+            .edge => |side| Rect{ .x = if (side == .left) v.x else v.x + v.w * (1 - edge_share), .y = v.y, .w = v.w * edge_share, .h = v.h },
             .node => |n| blk: {
                 const node = &self.nodes[n.index];
                 const r = node.rect;
@@ -668,6 +795,14 @@ pub const DockSpace = struct {
                 std.mem.sort(u8, order[0..n], self, Z.less);
                 for (order[0..n], 0..) |i, rank| try layers.append(b.allocator, try self.floatingElement(b, i, @intCast(rank), provider));
                 if (self.drag == .tab and self.drag.tab.started) try self.dragPreview(b, &layers);
+                // A floating window dragged to the edge shows where it would dock.
+                if (self.drag == .move) if (self.edgeAt(self.drag.move.pointer[0], self.drag.move.pointer[1])) |side| {
+                    const r = self.previewRect(.{ .edge = side }).?;
+                    const hint = try b.node(0, .{ .width = r.w, .height = r.h, .z_index = 900 }, .{ .custom = .{ .context = &grip_marker, .draw = drawHint } }, &.{});
+                    hint.overlay = .{ .point = .init(r.x, r.y) };
+                    hint.accessibility.role = .ignored;
+                    try layers.append(b.allocator, hint);
+                };
             },
             .floating => return error.FloatingIsPartOfMain,
             .window => |i| {
@@ -685,7 +820,9 @@ pub const DockSpace = struct {
         if (node.kind == .split) {
             // Full length both ways: rows don't stretch children, so a side-by-side splitter
             // without a height would be 0px tall and impossible to grab.
-            const handle = try b.node(split_first + index, if (node.vertical) .{ .width = r.w, .height = splitter } else .{ .width = splitter, .height = r.h }, .hover, &.{});
+            const line = try b.allocator.create(Splitter);
+            line.* = .{ .id = split_first + index, .vertical = node.vertical };
+            const handle = try b.node(split_first + index, if (node.vertical) .{ .width = r.w, .height = splitter } else .{ .width = splitter, .height = r.h }, .{ .custom = .{ .context = line, .draw = drawSplitter } }, &.{});
             handle.cursor = if (node.vertical) .ns_resize else .ew_resize;
             handle.accessibility = .{ .role = .slider, .label = "Resize panels", .numeric_value = node.ratio };
             return b.node(0, .{ .width = r.w, .height = r.h, .direction = if (node.vertical) .column else .row }, .none, &.{
@@ -810,6 +947,16 @@ const compass_contexts = blk: {
 fn recordSpan(context: *const anyopaque, _: *Canvas, r: Rect) anyerror!void {
     const span: *[2]f32 = @ptrCast(@alignCast(@constCast(context)));
     span.* = .{ r.x, r.x + r.w };
+}
+
+/// A splitter between two panes: a hairline marking their boundary, highlighted while hovered.
+const Splitter = struct { id: u32, vertical: bool };
+fn drawSplitter(context: *const anyopaque, c: *Canvas, r: Rect) anyerror!void {
+    const s: *const Splitter = @ptrCast(@alignCast(context));
+    const hot = c.hot_id == s.id;
+    if (hot) try c.roundRect(r, c.theme.accent, c.theme.radiusMd());
+    const line = if (s.vertical) Rect{ .x = r.x, .y = r.y + r.h / 2 - 0.5, .w = r.w, .h = 1 } else Rect{ .x = r.x + r.w / 2 - 0.5, .y = r.y, .w = 1, .h = r.h };
+    try c.rect(line, if (hot) c.theme.ring else c.theme.border);
 }
 
 fn drawHint(_: *const anyopaque, c: *Canvas, r: Rect) anyerror!void {
@@ -1082,4 +1229,57 @@ test "the stack menu closes a panel, and add brings it back" {
     try std.testing.expect(dock.nodeOf(2) == null and dock.menu == none);
     try dock.add(2, null, .center);
     try std.testing.expect(dock.nodeOf(2) != null);
+}
+
+test "closing a popped-out or floating panel puts it back where it was" {
+    var dock = DockSpace.init();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 1000, .h = 600 };
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .left);
+    try dock.add(3, 1, .bottom);
+    try dock.add(4, 3, .center);
+    dock.nodes[dock.nodes[dock.nodeOf(2).?].parent].ratio = 0.2;
+    dock.layout(viewport);
+    const left = dock.nodes[dock.nodeOf(2).?].rect;
+    // A column of its own: back on the left, at its old width.
+    try dock.detach(2);
+    dock.redock(.{ .window = 0 });
+    dock.layout(viewport);
+    try std.testing.expectEqual(left, dock.nodes[dock.nodeOf(2).?].rect);
+    // A tab: back into its old stack.
+    try dock.float(4, .{ .x = 100, .y = 100, .w = 300, .h = 200 });
+    dock.redock(.{ .floating = 0 });
+    try std.testing.expectEqual(dock.nodeOf(3).?, dock.nodeOf(4).?);
+}
+
+test "tabs and floating windows dropped at the main window's edge dock there full height" {
+    var dock = DockSpace.init();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 1000, .h = 600 };
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .right);
+    try dock.add(3, 2, .bottom);
+    dock.layout(viewport);
+    // Drag panel 3 (bottom right) to the left edge.
+    const start = dock.nodes[dock.nodeOf(3).?].rect;
+    try std.testing.expect(dock.press(tab_first + 3, start.x + 10, start.y + 10));
+    dock.dragTo(start.x - 200, start.y);
+    dock.dragTo(10, 300);
+    try std.testing.expectEqual(Side.left, dock.drag.tab.target.?.edge);
+    dock.release(10, 300);
+    dock.layout(viewport);
+    const column = dock.nodes[dock.nodeOf(3).?].rect;
+    try std.testing.expectEqual(@as(f32, 0), column.x);
+    try std.testing.expectEqual(viewport.h, column.h);
+    try std.testing.expectApproxEqAbs(viewport.w * edge_share, column.w, splitter);
+    // A floating window let go at the right edge docks there too.
+    try dock.float(1, .{ .x = 300, .y = 100, .w = 300, .h = 200 });
+    dock.layout(viewport);
+    try std.testing.expect(dock.press(bar_first + dock.nodeOf(1).?, 320, 110));
+    dock.dragTo(990, 300);
+    dock.release(990, 300);
+    dock.layout(viewport);
+    try std.testing.expect(dock.floating[0] == null);
+    const right = dock.nodes[dock.nodeOf(1).?].rect;
+    try std.testing.expectApproxEqAbs(viewport.w, right.x + right.w, 0.01);
+    try std.testing.expectEqual(viewport.h, right.h);
 }
