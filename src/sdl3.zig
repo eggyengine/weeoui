@@ -278,6 +278,9 @@ pub const Frame = struct {
     /// Other controls on the bar, such as menus from `ui.titlebar.barWithMenus`; presses there
     /// go to the app rather than moving the window.
     controls: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// More controls elsewhere on the bar (a toolbar button in its middle, say), clickable too.
+    extra_controls: [4]ui.Rect = @splat(.{ .x = 0, .y = 0, .w = 0, .h = 0 }),
+    extra_count: u8 = 0,
     /// While a menu or other popup is open the bar doesn't drag, so the press that closes it
     /// reaches the app; the next one moves the window.
     popup_open: bool = false,
@@ -297,13 +300,17 @@ fn frameHitTest(window: sdl3.video.Window, area: sdl3.rect.IPoint, frame: ?*Fram
     const f = frame orelse return .normal;
     const size = window.getSize() catch return .normal;
     const s = f.scale;
-    var clickable: [4]ui.Rect = undefined;
-    @memcpy(clickable[0..f.button_count], f.buttons[0..f.button_count]);
-    clickable[f.button_count] = f.controls;
+    var clickable: [3 + 1 + 4]ui.Rect = undefined;
+    var count: usize = f.button_count;
+    @memcpy(clickable[0..count], f.buttons[0..f.button_count]);
+    clickable[count] = f.controls;
+    count += 1;
+    @memcpy(clickable[count..][0..f.extra_count], f.extra_controls[0..f.extra_count]);
+    count += f.extra_count;
     const hit = ui.titlebar.hitTest(
         .{ @as(f32, @floatFromInt(size.@"0")) * s, @as(f32, @floatFromInt(size.@"1")) * s },
         f.bar,
-        clickable[0 .. f.button_count + 1],
+        clickable[0..count],
         window.getFlags().maximized,
         @as(f32, @floatFromInt(area.x)) * s,
         @as(f32, @floatFromInt(area.y)) * s,
