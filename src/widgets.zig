@@ -82,7 +82,7 @@ pub fn inputOtp(b: L.Builder, first_id: u32, digits: []const u8, slots: usize) !
 /// Field-looking trigger: value (or muted placeholder) with a chevron inside the box.
 fn selectBox(b: L.Builder, id: u32, value: []const u8, placeholder: []const u8, height: f32) !*L.Element {
     const result = try b.node(id, .{ .direction = .row, .height = height, .align_items = .center, .gap = 8, .padding = .{ .left = 12, .right = 12 } }, .{ .input = .{} }, &.{
-        try b.node(0, .{ .grow = 1, .height = height }, .{ .text = .{ .value = if (value.len == 0) placeholder else value, .size = 14, .tone = if (value.len == 0) .muted else .foreground } }, &.{}),
+        try b.node(0, .{ .grow = 1 }, .{ .text = .{ .value = if (value.len == 0) placeholder else value, .size = 14, .tone = if (value.len == 0) .muted else .foreground } }, &.{}),
         try b.node(0, .{ .width = 16, .height = 16 }, .{ .icon = .chevron_down }, &.{}),
     });
     result.children[0].accessibility.role = .ignored;
