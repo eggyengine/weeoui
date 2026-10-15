@@ -20,9 +20,25 @@ const text_edit = @import("text_edit.zig");
 const Image = @import("image.zig").Image;
 const ColorEditor = @import("components/color_editor.zig").ColorEditor;
 const ButtonVariant = @import("components/button.zig").Variant;
+const components = struct {
+    const button = @import("components/button.zig");
+};
 const BadgeVariant = @import("components/badge.zig").Variant;
 
 pub const Container = enum { column, row, card };
+
+/// How roomy a `Context`'s widgets are. `compact` is a desktop tool's: shorter controls, tighter
+/// spacing and smaller text (body text at the theme's `text_size`, notes at `small_text_size`),
+/// for panels that show a lot at once.
+pub const Density = enum {
+    comfortable,
+    compact,
+
+    /// `comfortable`'s size, or `compact`'s.
+    fn pick(density: Density, comfortable: f32, compact: f32) f32 {
+        return if (density == .compact) compact else comfortable;
+    }
+};
 
 /// Keyboard input queued for the focused widget, in arrival order.
 const Pending = union(enum) {
@@ -119,6 +135,8 @@ pub const Context = struct {
     focus_visible: bool = false,
     /// Pointer shape for the element under the pointer, after `render`; backends apply it.
     cursor: input.Cursor = .default,
+    /// How roomy the widgets are; see `Density`.
+    density: Density = .comfortable,
     /// The element the last widget call added, for `tooltip`.
     last_added: ?*L.Element = null,
     /// The window's own scroll position: the page scrolls whenever its content is taller than the window.
@@ -331,13 +349,16 @@ pub const Context = struct {
         if (self.err != null) return;
         const b = self.builder();
         switch (open.kind) {
-            .column => self.add(open.id, .{ .gap = 12 }, .none, open.children.items),
-            .row => self.add(open.id, .{ .direction = .row, .gap = 12, .align_items = .center, .wrap = true }, .none, open.children.items),
+            .column => self.add(open.id, .{ .gap = self.gap() }, .none, open.children.items),
+            .row => self.add(open.id, .{ .direction = .row, .gap = self.gap(), .align_items = .center, .wrap = true }, .none, open.children.items),
             // Cards stop growing at a readable width instead of stretching across wide windows.
-            .card => self.add(open.id, .{ .padding = .{ .left = 24, .right = 24, .top = 24, .bottom = 24 }, .gap = 12, .max_width = 640 }, .card, open.children.items),
-            .grid => self.add(open.id, .{ .columns = open.columns, .gap = 12 }, .none, open.children.items),
+            .card => {
+                const inset = self.density.pick(24, 12);
+                self.add(open.id, .{ .padding = .{ .left = inset, .right = inset, .top = inset, .bottom = inset }, .gap = self.gap(), .max_width = 640 }, .card, open.children.items);
+            },
+            .grid => self.add(open.id, .{ .columns = open.columns, .gap = self.gap() }, .none, open.children.items),
             .scroll => {
-                const area = b.node(open.id, .{ .height = open.height, .overflow = .scroll, .gap = 12, .padding = .{ .right = 12 } }, .none, open.children.items) catch |e| return self.fail(e);
+                const area = b.node(open.id, .{ .height = open.height, .overflow = .scroll, .gap = self.gap(), .padding = .{ .right = 12 } }, .none, open.children.items) catch |e| return self.fail(e);
                 area.scroll = open.scroll;
                 open.scroll.?.overlay_bar = true;
                 self.append(area);
@@ -360,22 +381,33 @@ pub const Context = struct {
 
     pub fn label(self: *Context, comptime fmt: []const u8, args: anytype) void {
         const value = std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch |e| return self.fail(e);
-        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true } }, &.{});
+        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true, .size = self.bodySize() } }, &.{});
     }
 
     /// `level` 1 (page title) to 4 (small section title).
     pub fn heading(self: *Context, level: u3, value: []const u8) void {
-        self.append(W.heading(self.builder(), level, value) catch |e| return self.fail(e));
+        const result = W.heading(self.builder(), level, value) catch |e| return self.fail(e);
+        if (self.density == .compact) {
+            // The text is the heading itself, or (level 2) the first of it and its rule.
+            const title = if (result.paint_kind == .text) result else result.children[0];
+            title.paint_kind.text.size = switch (level) {
+                1 => 22,
+                2 => 18,
+                3 => 15,
+                else => 13,
+            };
+        }
+        self.append(result);
     }
 
     /// Wrapped body text.
     pub fn text(self: *Context, value: []const u8) void {
-        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true } }, &.{});
+        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true, .size = self.bodySize() } }, &.{});
     }
 
     /// Wrapped secondary text.
     pub fn muted(self: *Context, value: []const u8) void {
-        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true, .tone = .muted, .size = 14 } }, &.{});
+        self.add(0, .{}, .{ .text = .{ .value = value, .wrap = true, .tone = .muted, .size = self.density.pick(14, self.theme.small_text_size) } }, &.{});
     }
 
     pub fn separator(self: *Context) void {
@@ -438,7 +470,9 @@ pub const Context = struct {
         const widget = self.focusable(value);
         const clicked_now = self.pressed(widget);
         const shown = visible(value);
-        self.add(widget, .{ .width = @max(96, self.font.measure(shown, 14) + 32), .height = 40 }, .{ .button = .{ .label = shown, .variant = variant, .hot = self.hoveredWidget() == widget } }, &.{});
+        const size: components.button.Size = if (self.density == .compact) .sm else .default;
+        const width = self.font.measure(shown, if (size == .sm) components.button.sm_text_size else 14) + 2 * size.padding();
+        self.add(widget, .{ .width = @max(self.density.pick(96, 48), width), .height = self.controlHeight() }, .{ .button = .{ .label = shown, .variant = variant, .size = size, .hot = self.hoveredWidget() == widget } }, &.{});
         return clicked_now;
     }
 
@@ -447,7 +481,7 @@ pub const Context = struct {
         const widget = self.focusable(value_label);
         const changed = self.pressed(widget);
         if (changed) value.* = !value.*;
-        self.add(widget, .{ .height = 32 }, .{ .checkbox = .{ .label = visible(value_label), .checked = value.* } }, &.{});
+        self.add(widget, .{ .height = self.rowHeight() }, .{ .checkbox = .{ .label = visible(value_label), .checked = value.* } }, &.{});
         return changed;
     }
 
@@ -458,7 +492,7 @@ pub const Context = struct {
         if (changed) value.* = !value.*;
         const shown = visible(value_label);
         // Room for the label and the 40-wide switch, so it doesn't collapse inside a row.
-        self.add(widget, .{ .height = 32, .min_width = self.font.measure(shown, self.theme.text_size) + 56 }, .{ .toggle = .{ .label = shown, .enabled = value.* } }, &.{});
+        self.add(widget, .{ .height = self.rowHeight(), .min_width = self.font.measure(shown, self.theme.text_size) + 56 }, .{ .toggle = .{ .label = shown, .enabled = value.* } }, &.{});
         return changed;
     }
 
@@ -471,7 +505,7 @@ pub const Context = struct {
         const circle = b.node(0, .{ .width = 20, .height = 20 }, .{ .radio = .{ .checked = selected.* == index } }, &.{}) catch |e| return self.failed(e);
         const caption = b.node(0, .{}, .{ .text = .{ .value = visible(value_label) } }, &.{}) catch |e| return self.failed(e);
         caption.accessibility.role = .ignored;
-        self.add(widget, .{ .direction = .row, .height = 32, .gap = 10, .align_items = .center }, .none, &.{ circle, caption });
+        self.add(widget, .{ .direction = .row, .height = self.rowHeight(), .gap = 10, .align_items = .center }, .none, &.{ circle, caption });
         if (self.last_added) |added| added.accessibility = .{ .role = .radio, .label = visible(value_label) };
         return changed;
     }
@@ -514,7 +548,7 @@ pub const Context = struct {
                 changed = true;
             }
             child.* = b.tab(widget, visible(tab_label), selected.* == i) catch |e| return self.failed(e);
-            child.*.style.height = 32;
+            child.*.style.height = self.rowHeight();
         }
         // Too many tabs for the width scroll sideways instead of squashing.
         const bar = b.node(0, .{ .direction = .row, .gap = 2, .padding = .{ .left = 3, .right = 3, .top = 3, .bottom = 3 }, .overflow = .scroll }, .{ .surface = .track }, children) catch |e| return self.failed(e);
@@ -550,7 +584,8 @@ pub const Context = struct {
         } else if (self.open_popup == widget and self.clicked and !on_item) self.open_popup = 0;
         const current = if (selected.* < options.len) options[selected.*] else "";
         const trigger = W.select(b, widget, current, visible(value_label)) catch |e| return self.failed(e);
-        trigger.style.min_width = 200;
+        trigger.style.min_width = self.density.pick(200, 120);
+        trigger.style.height = self.controlHeight();
         self.append(trigger);
         if (self.open_popup == widget) {
             const choices = self.arena.allocator().alloc(W.Choice, options.len) catch |e| return self.failed(e);
@@ -614,7 +649,7 @@ pub const Context = struct {
             };
         }
         const focused = self.focus == widget;
-        self.add(widget, .{ .height = 40, .min_width = 200 }, .{ .input = .{
+        self.add(widget, .{ .height = self.controlHeight(), .min_width = self.density.pick(200, 120) }, .{ .input = .{
             .value = edit.text(),
             .placeholder = placeholder,
             .focused = focused,
@@ -656,6 +691,36 @@ pub const Context = struct {
     // Escape hatch ------------------------------------------------------------
 
     /// Frame-lifetime allocator for building `widgets`/`Layout` elements by hand.
+    /// The page's padding on each side.
+    pub fn pagePadding(self: *const Context) f32 {
+        return self.density.pick(16, 10);
+    }
+
+    /// How wide the page's content is: the viewport less its padding.
+    pub fn contentWidth(self: *const Context) f32 {
+        return @max(0, self.viewport.w - 2 * self.pagePadding());
+    }
+
+    /// Height of buttons, text fields and selects.
+    fn controlHeight(self: *const Context) f32 {
+        return self.density.pick(40, 28);
+    }
+
+    /// Height of checkboxes, switches, radios and tabs.
+    fn rowHeight(self: *const Context) f32 {
+        return self.density.pick(32, 24);
+    }
+
+    /// Space between widgets.
+    fn gap(self: *const Context) f32 {
+        return self.density.pick(12, 8);
+    }
+
+    /// Body text's size.
+    fn bodySize(self: *const Context) f32 {
+        return self.density.pick(16, self.theme.text_size);
+    }
+
     pub fn builder(self: *Context) L.Builder {
         return .{ .allocator = self.arena.allocator() };
     }
@@ -695,7 +760,8 @@ pub const Context = struct {
         }
         self.last_render_ms = self.time_ms;
         const b = self.builder();
-        const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 16 }, .gap = 12, .overflow = .scroll }, .none, self.stack.items[0].children.items);
+        const inset = self.pagePadding();
+        const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = inset, .right = inset, .top = inset, .bottom = inset }, .gap = self.gap(), .overflow = .scroll }, .none, self.stack.items[0].children.items);
         root.scroll = &self.scroll;
         self.scroll.overlay_bar = true;
         root.layout(self.viewport, self.font);
@@ -1151,4 +1217,19 @@ test "contexts made with initWithFont share the first one's font and leave freei
     second.newFrame(.{ .x = 0, .y = 0, .w = 200, .h = 100 });
     second.label("shared", .{});
     try std.testing.expect((try second.render()).len > 0);
+}
+
+test "a compact context has shorter controls and smaller text" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    ctx.density = .compact;
+    ctx.theme.text_size = 12;
+    ctx.newFrame(.{ .x = 0, .y = 0, .w = 400, .h = 300 });
+    _ = ctx.button("Save");
+    ctx.label("Hello", .{});
+    _ = try ctx.render();
+    const root = ctx.last_root.?;
+    try std.testing.expectEqual(@as(f32, 28), root.children[0].bounds.h);
+    try std.testing.expectEqual(@as(f32, 12), root.children[1].paint_kind.text.size);
+    try std.testing.expectEqual(@as(f32, 380), ctx.contentWidth());
 }

@@ -30,6 +30,7 @@ pub const TextEdit = text_edit.TextEdit;
 pub const Layout = @import("layout.zig");
 pub const input = @import("input.zig");
 pub const Context = @import("context.zig").Context;
+pub const Density = @import("context.zig").Density;
 pub const accessibility = @import("accessibility.zig");
 pub const accesskit = @import("accesskit.zig");
 pub const widgets = @import("widgets.zig");
