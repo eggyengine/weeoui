@@ -303,6 +303,8 @@ pub const MenuItem = struct {
     disabled: bool = false,
     /// Non-interactive group heading.
     heading: bool = false,
+    /// `sm` draws the row's text at `button.sm_text_size`, as in a desktop menu bar's menus.
+    size: @import("button.zig").Size = .default,
 };
 
 pub fn drawMenuItem(c: *Canvas, r: Rect, opts: MenuItem) !void {
@@ -319,15 +321,18 @@ pub fn drawMenuItem(c: *Canvas, r: Rect, opts: MenuItem) !void {
         }
         x += 24;
     }
-    const size = if (opts.heading) t.small_text_size else t.text_size;
+    const sm = opts.size == .sm;
+    const button = @import("button.zig");
+    const shortcut_size = if (sm) button.sm_small_text_size else t.small_text_size;
+    const size = if (opts.heading) shortcut_size else if (sm) button.sm_text_size else t.text_size;
     var end = r.x + r.w - 8;
     if (opts.submenu) {
         try c.icon(.{ .x = end - 16, .y = r.center().y - 8, .w = 16, .h = 16 }, .chevron_right, color);
         end -= 20;
     }
     if (opts.shortcut.len > 0) {
-        const width = c.font.measure(opts.shortcut, t.small_text_size);
-        try textIn(c, .{ .x = end - width, .y = r.y, .w = width, .h = r.h }, opts.shortcut, t.small_text_size, t.muted_foreground, .end);
+        const width = c.font.measure(opts.shortcut, shortcut_size);
+        try textIn(c, .{ .x = end - width, .y = r.y, .w = width, .h = r.h }, opts.shortcut, shortcut_size, t.muted_foreground, .end);
         end -= width + 12;
     }
     try textIn(c, .{ .x = x, .y = r.y, .w = @max(0, end - x), .h = r.h }, opts.label, size, color, .start);

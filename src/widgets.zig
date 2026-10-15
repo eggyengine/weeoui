@@ -6,6 +6,8 @@ const primitives = @import("components/primitives.zig");
 const Rect = @import("types.zig").Rect;
 const Icon = @import("font.zig").Icon;
 const ButtonVariant = @import("components/button.zig").Variant;
+const ButtonSize = @import("components/button.zig").Size;
+const sm_text_size = @import("components/button.zig").sm_text_size;
 
 pub const Choice = struct { id: u32, label: []const u8 };
 pub const Section = struct { id: u32, title: []const u8, open: bool = false, content: []const *L.Element = &.{} };
@@ -156,7 +158,19 @@ pub fn menu(b: L.Builder, choices: []const Choice, highlighted_id: u32) !*L.Elem
 /// Menu panel with shortcuts, separators, check/radio rows and submenus. The submenu whose
 /// id is `open_submenu` is attached to its row.
 pub fn menuItems(b: L.Builder, items: []const MenuItem, highlighted_id: u32, open_submenu: u32) !*L.Element {
-    if (items.len == 0) return b.node(0, .{ .width = 220, .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 } }, .{ .surface = .menu }, &.{try b.node(0, .{}, .{ .text = .{ .value = "No results", .tone = .muted, .size = 14 } }, &.{})});
+    return sizedMenuItems(b, items, highlighted_id, open_submenu, .default);
+}
+
+/// `menuItems` at `size`: `sm` is a desktop menu bar's compact menu, its text, rows and panel
+/// smaller, submenus too.
+pub fn sizedMenuItems(b: L.Builder, items: []const MenuItem, highlighted_id: u32, open_submenu: u32, size: ButtonSize) !*L.Element {
+    const sm = size == .sm;
+    const panel_width: f32 = if (sm) 220 else 240;
+    if (items.len == 0) {
+        const no_results = try b.node(0, .{}, .{ .text = .{ .value = "No results", .tone = .muted, .size = if (sm) sm_text_size else 14 } }, &.{});
+        const inset: f32 = if (sm) 8 else 12;
+        return b.node(0, .{ .width = panel_width, .padding = .{ .left = inset, .right = inset, .top = inset, .bottom = inset } }, .{ .surface = .menu }, &.{no_results});
+    }
     var inset = false;
     for (items) |entry| inset = inset or entry.kind == .checkbox or entry.kind == .radio;
     var children: std.ArrayList(*L.Element) = .empty;
@@ -166,7 +180,8 @@ pub fn menuItems(b: L.Builder, items: []const MenuItem, highlighted_id: u32, ope
             try children.append(b.allocator, try b.node(0, .{ .height = 9, .padding = .{ .top = 4, .bottom = 4, .left = -4, .right = -4 } }, .none, &.{try b.separator()}));
             continue;
         }
-        const row = try b.node(if (entry.kind == .label) 0 else entry.id, .{ .height = if (entry.kind == .label) 28 else 32 }, .{ .menu_item = .{
+        const row_height: f32 = if (entry.kind == .label) (if (sm) 22 else 28) else (if (sm) 26 else 32);
+        const row = try b.node(if (entry.kind == .label) 0 else entry.id, .{ .height = row_height }, .{ .menu_item = .{
             .label = entry.label,
             .shortcut = entry.shortcut,
             .hot = entry.id != 0 and entry.id == highlighted_id,
@@ -178,16 +193,17 @@ pub fn menuItems(b: L.Builder, items: []const MenuItem, highlighted_id: u32, ope
             .submenu = entry.kind == .submenu,
             .disabled = entry.disabled,
             .heading = entry.kind == .label,
+            .size = size,
         } }, &.{});
         row.accessibility.disabled = entry.disabled;
         if (entry.kind == .submenu) row.accessibility.expanded = submenuOpen(entry, open_submenu);
         try children.append(b.allocator, row);
         if (entry.id != 0 and submenuOpen(entry, open_submenu)) {
-            const sub = try menuItems(b, entry.items, highlighted_id, open_submenu);
+            const sub = try sizedMenuItems(b, entry.items, highlighted_id, open_submenu, size);
             try children.append(b.allocator, anchorTo(sub, row, .right, 150));
         }
     }
-    const result = try b.node(0, .{ .width = 240, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 }, .gap = 1 }, .{ .surface = .menu }, children.items);
+    const result = try b.node(0, .{ .width = panel_width, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 }, .gap = 1 }, .{ .surface = .menu }, children.items);
     return result;
 }
 
@@ -231,14 +247,13 @@ fn menubarWith(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlight
     var children: std.ArrayList(*L.Element) = .empty;
     defer children.deinit(b.allocator);
     for (menus) |entry| {
-        const trigger_height: f32 = if (flush) window_menubar_height - 6 else 30;
-        const trigger = if (entry.icon) |icon|
-            try b.node(entry.id, .{ .width = trigger_height, .height = trigger_height, .padding = .{ .left = 5, .right = 5, .top = 5, .bottom = 5 } }, .{ .button = .{ .label = "", .variant = .ghost, .hot = entry.id == open_id } }, &.{try b.node(0, .{ .width = 16, .height = 16 }, .{ .icon = icon }, &.{})})
+        const trigger = if (flush) try flushTrigger(b, entry, placement == .titlebar, entry.id == open_id or entry.id == highlighted_id) else if (entry.icon) |icon|
+            try b.node(entry.id, .{ .width = 30, .height = 30, .padding = .{ .left = 5, .right = 5, .top = 5, .bottom = 5 } }, .{ .button = .{ .label = "", .variant = .ghost, .hot = entry.id == open_id } }, &.{try b.node(0, .{ .width = 16, .height = 16 }, .{ .icon = icon }, &.{})})
         else
-            try b.node(entry.id, .{ .height = trigger_height }, .{ .button = .{ .label = entry.label, .variant = .ghost, .hot = entry.id == open_id } }, &.{});
+            try b.node(entry.id, .{ .height = 30 }, .{ .button = .{ .label = entry.label, .variant = .ghost, .hot = entry.id == open_id } }, &.{});
         trigger.accessibility = .{ .role = .button, .label = entry.label, .expanded = entry.id == open_id };
         try children.append(b.allocator, trigger);
-        if (entry.id == open_id) try children.append(b.allocator, anchorTo(try menuItems(b, entry.items, highlighted_id, open_submenu), trigger, .bottom, 100));
+        if (entry.id == open_id) try children.append(b.allocator, anchorTo(try sizedMenuItems(b, entry.items, highlighted_id, open_submenu, if (flush) .sm else .default), trigger, .bottom, 100));
     }
     const bar = if (placement == .titlebar)
         try b.node(0, .{ .direction = .row, .gap = 0, .align_items = .center, .padding = .{ .left = 3, .right = 3 } }, .none, children.items)
@@ -250,6 +265,30 @@ fn menubarWith(b: L.Builder, menus: []const MenubarMenu, open_id: u32, highlight
     bar.accessibility.role = .menu;
     // A column hands the bar the space it has, so a long one wraps; `.start` keeps it hugging its menus.
     return b.node(0, if (flush) .{ .direction = .row } else .{ .align_items = .start }, .none, &.{bar});
+}
+
+/// Height of a flush menu bar's trigger highlight, inside the full-height trigger.
+pub const flush_trigger_height: f32 = 24;
+
+/// How wide a flush menu bar's trigger for `label` is, for apps that fit menus to a width.
+pub fn flushTriggerWidth(font: *const @import("font.zig").Font, label: []const u8) f32 {
+    return font.measure(label, sm_text_size) + 2 * ButtonSize.sm.padding();
+}
+
+/// A trigger of a menu bar flush with the window (`windowMenubar`, `titlebarMenubar`): a compact
+/// (`sm`) ghost button, but pressable across the bar's whole height, as a desktop menu is, so a
+/// press just above or below its label opens the menu rather than landing on the bar. `lit`
+/// shows the highlight (open, or under the pointer).
+fn flushTrigger(b: L.Builder, entry: MenubarMenu, in_titlebar: bool, lit: bool) !*L.Element {
+    const bar_height = if (in_titlebar) @import("titlebar.zig").height else window_menubar_height;
+    const look = if (entry.icon) |icon|
+        try b.node(0, .{ .width = flush_trigger_height, .height = flush_trigger_height, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 } }, .{ .button = .{ .label = "", .variant = .ghost, .size = .sm, .hot = lit } }, &.{try b.node(0, .{ .width = 16, .height = 16 }, .{ .icon = icon }, &.{})})
+    else
+        try b.node(0, .{ .height = flush_trigger_height }, .{ .button = .{ .label = entry.label, .variant = .ghost, .size = .sm, .hot = lit } }, &.{});
+    look.accessibility.role = .ignored;
+    const trigger = try b.node(entry.id, .{ .height = bar_height, .direction = .row, .align_items = .center }, .none, &.{look});
+    trigger.cursor = .pointer;
+    return trigger;
 }
 
 pub const NavigationLink = struct { id: u32, title: []const u8, description: []const u8 = "" };

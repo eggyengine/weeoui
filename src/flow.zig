@@ -10,6 +10,7 @@ const L = @import("layout.zig");
 const Element = L.Element;
 const Style = L.Style;
 const Builder = L.Builder;
+const button = @import("components/button.zig");
 const ScrollState = L.ScrollState;
 
 /// Give `root` and its subtree bounds and clips inside `viewport`.
@@ -56,9 +57,12 @@ fn naturalWidth(node: *Element, font: *const Font) f32 {
     } else switch (node.paint_kind) {
         .text => |t| width = font.measure(t.value, t.size),
         // ponytail: measures at the default theme's text sizes; pass explicit widths for custom themes.
-        .button => |b| width = font.measure(b.label, 14) + 32,
+        .button => |b| width = font.measure(b.label, if (b.size == .sm) button.sm_text_size else 14) + 2 * b.size.padding(),
         .badge => |b| width = font.measure(b.label, 13) + 20,
-        .menu_item => |item| width = font.measure(item.label, 14) + font.measure(item.shortcut, 13) + 64,
+        .menu_item => |item| width = if (item.size == .sm)
+            font.measure(item.label, button.sm_text_size) + font.measure(item.shortcut, button.sm_small_text_size) + 56
+        else
+            font.measure(item.label, 14) + font.measure(item.shortcut, 13) + 64,
         .toggle_button => |t| width = font.measure(t.label, 14) + 24,
         .tab => |t| width = font.measure(t.label, 14) + 24,
         else => {},

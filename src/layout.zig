@@ -60,7 +60,7 @@ pub const Paint = union(enum) {
     separator,
     text: Text,
     badge: struct { label: []const u8, variant: components.badge.Variant = .default },
-    button: struct { label: []const u8, variant: components.button.Variant = .default, hot: bool = false },
+    button: struct { label: []const u8, variant: components.button.Variant = .default, size: components.button.Size = .default, hot: bool = false },
     checkbox: struct { label: []const u8, checked: bool = false },
     toggle: struct { label: []const u8, enabled: bool = false },
     slider: struct { value: f32 = 0 },
@@ -339,7 +339,7 @@ pub const Element = struct {
                 c.clip = self.clip;
             },
             .badge => |b| try components.badge.draw(c, self.bounds, b.label, b.variant),
-            .button => |b| try components.button.draw(c, self.bounds, b.label, b.variant, b.hot or (self.id != 0 and self.id == c.hot_id)),
+            .button => |b| try components.button.draw(c, self.bounds, b.label, b.variant, b.size, b.hot or (self.id != 0 and self.id == c.hot_id)),
             .checkbox => |b| try components.checkbox.draw(c, self.bounds, b.label, b.checked),
             .toggle => |b| try components.toggle.draw(c, self.bounds, b.label, b.enabled),
             .slider => |s| try components.slider.draw(c, self.bounds, s.value),

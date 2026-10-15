@@ -4,7 +4,32 @@ const Rect = @import("../types.zig").Rect;
 /// shadcn/ui button variants.
 pub const Variant = enum { default, secondary, outline, ghost, destructive, link };
 
-pub fn draw(c: *Canvas, r: Rect, label: []const u8, variant: Variant, hot: bool) !void {
+/// shadcn/ui button sizes: `sm` is the compact one desktop menu bars use.
+pub const Size = enum {
+    default,
+    sm,
+
+    /// The label's text size: the theme's for `default`.
+    pub fn textSize(size: Size, theme: @import("../types.zig").Theme) f32 {
+        return switch (size) {
+            .default => theme.text_size,
+            .sm => sm_text_size,
+        };
+    }
+
+    /// Horizontal padding around the label, on each side.
+    pub fn padding(size: Size) f32 {
+        return switch (size) {
+            .default => 16,
+            .sm => 8,
+        };
+    }
+};
+/// `Size.sm`'s text size, for menus and other compact controls.
+pub const sm_text_size: f32 = 12;
+pub const sm_small_text_size: f32 = 11;
+
+pub fn draw(c: *Canvas, r: Rect, label: []const u8, variant: Variant, size: Size, hot: bool) !void {
     const radius = c.theme.radiusMd();
     const t = c.theme;
     const shade: f32 = if (hot) 0.92 else 1;
@@ -30,9 +55,10 @@ pub fn draw(c: *Canvas, r: Rect, label: []const u8, variant: Variant, hot: bool)
         .outline, .ghost => if (hot) t.accent_foreground else t.foreground,
         .link => t.accent_foreground,
     };
-    try c.textIn(r, label, t.text_size, color, .center);
+    const text_size = size.textSize(t);
+    try c.textIn(r, label, text_size, color, .center);
     if (variant == .link and hot) {
-        const ink = c.font.inkBounds(label, t.text_size);
+        const ink = c.font.inkBounds(label, text_size);
         const x = r.center().x - ink.w / 2;
         try c.rect(.{ .x = x, .y = r.center().y + ink.h / 2 + 2, .w = ink.w, .h = 1 }, color);
     }
