@@ -288,7 +288,11 @@ fn place(node: *Element, r: Rect, inherited_clip: Rect, font: *const Font, inher
     for (0..node.children.len) |i| {
         const child = node.paintChild(i);
         const overlay = child.overlay orelse continue;
-        const width = widthFor(child.style, inherited_clip.w);
+        // A popup without a width (a tooltip, a menu) fits its content; a viewport overlay fills.
+        const width = if (overlay != .viewport and child.style.width == null)
+            @min(inherited_clip.w, naturalWidth(child, font))
+        else
+            widthFor(child.style, inherited_clip.w);
         const height = estimatedHeight(child, width, font);
         var x: f32 = inherited_clip.x;
         var y: f32 = inherited_clip.y;

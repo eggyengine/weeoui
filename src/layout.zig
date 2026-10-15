@@ -582,6 +582,22 @@ test "overlay escapes flow, flips at viewport edge, and paints above its trigger
     try std.testing.expect(root.hit(2, panel.bounds.x + 2, panel.bounds.y + 2));
 }
 
+test "a popup without a width is as wide as its text" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    const trigger = try b.node(1, .{ .height = 30 }, .{ .button = .{ .label = "Options" } }, &.{});
+    const tip = try b.node(2, .{ .padding = .{ .left = 10, .right = 10 } }, .{ .surface = .tooltip }, &.{
+        try b.node(0, .{}, .{ .text = .{ .value = "Save", .size = 13 } }, &.{}),
+    });
+    tip.overlay = .{ .anchor = .{ .target = trigger } };
+    const root = try b.node(0, .{}, .none, &.{ trigger, tip });
+    root.layout(.{ .x = 0, .y = 0, .w = 600, .h = 200 }, &font);
+    try std.testing.expectEqual(font.measure("Save", 13) + 20, tip.bounds.w);
+}
+
 test "overlay layers paint globally in z order and scroll outside anchor bounds" {
     var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer font.deinit();
