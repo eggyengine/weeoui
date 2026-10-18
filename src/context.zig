@@ -47,8 +47,8 @@ const Pending = union(enum) {
     text: struct { start: usize, len: usize },
 };
 
-/// Where a widget sat last frame and which overlay layer it was on (higher wins hit tests).
-const Target = struct { rect: Rect, z: i16 };
+/// Where a widget was last frame: its visible box, overlay layer, and nesting depth.
+const Target = struct { rect: Rect, z: i16, depth: u16 };
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
@@ -767,7 +767,7 @@ pub const Context = struct {
         root.layout(self.viewport, self.font);
         self.last_root = root;
         self.last_bounds.clearRetainingCapacity();
-        try self.remember(root, 0);
+        try self.remember(root, 0, 0);
         self.last_focusables.clearRetainingCapacity();
         try self.last_focusables.appendSlice(self.gpa, self.focusables.items);
         if (std.mem.indexOfScalar(u32, self.focusables.items, self.focus) == null) self.focus = 0;
@@ -834,10 +834,10 @@ pub const Context = struct {
         self.last_added = value;
     }
 
-    fn remember(self: *Context, value: *const L.Element, layer: i16) !void {
+    fn remember(self: *Context, value: *const L.Element, layer: i16, depth: u16) !void {
         const z = if (value.overlay != null) value.style.z_index else layer;
-        if (value.id != 0) try self.last_bounds.put(self.gpa, value.id, .{ .rect = value.bounds.intersection(value.clip), .z = z });
-        for (value.children) |child| try self.remember(child, z);
+        if (value.id != 0) try self.last_bounds.put(self.gpa, value.id, .{ .rect = value.bounds.intersection(value.clip), .z = z, .depth = depth });
+        for (value.children) |child| try self.remember(child, z, depth +| 1);
     }
 
     // ponytail: ids hash the label with the open-container path; identical labels in one container collide, use `##suffix`.
@@ -848,19 +848,21 @@ pub const Context = struct {
     }
 
     /// Topmost last-frame widget under the pointer: the highest overlay layer, then the smallest
-    /// area, so popups beat the page and nested hit targets win.
+    /// area, then the deepest, so popups beat the page and nested hit targets win, even one that
+    /// fills its container exactly.
     fn hoveredWidget(self: *const Context) u32 {
         var best: u32 = 0;
-        var best_z: i16 = std.math.minInt(i16);
+        var best_target: Target = .{ .rect = undefined, .z = std.math.minInt(i16), .depth = 0 };
         var area = std.math.inf(f32);
         var it = self.last_bounds.iterator();
         while (it.next()) |entry| {
             const target = entry.value_ptr.*;
             const r = target.rect;
             if (!r.contains(self.pointer.x, self.pointer.y)) continue;
-            if (target.z > best_z or (target.z == best_z and r.w * r.h < area)) {
+            const smaller = r.w * r.h < area or (r.w * r.h == area and target.depth > best_target.depth);
+            if (target.z > best_target.z or (target.z == best_target.z and smaller)) {
                 best = entry.key_ptr.*;
-                best_z = target.z;
+                best_target = target;
                 area = r.w * r.h;
             }
         }
@@ -1206,6 +1208,31 @@ test "a toggle in a row keeps room for its label and switch" {
     }
     const toggle = ctx.last_bounds.get(ctx.last_focusables.items[0]).?.rect;
     try std.testing.expect(toggle.w >= ctx.font.measure("Henrietta", ctx.theme.text_size) + 40);
+}
+
+test "a widget that fills its container exactly takes the click, not the container" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 400, .h = 600 };
+    // Each header fills a box with an id of its own, so the two share a rect.
+    var clicked: [8]u32 = @splat(0);
+    for (0..clicked.len + 1) |frame| {
+        ctx.newFrame(viewport);
+        const b = ctx.builder();
+        for (&clicked, 0..) |*count, i| {
+            var name: [16]u8 = undefined;
+            const box = ctx.idFor(try std.fmt.bufPrint(&name, "box {d}", .{i}));
+            const header = ctx.idFor(try std.fmt.bufPrint(&name, "header {d}", .{i}));
+            if (ctx.activated(header)) count.* += 1;
+            ctx.element(try b.node(box, .{ .width = 200, .height = 30 }, .none, &.{
+                try b.node(header, .{ .width = 200, .height = 30 }, .none, &.{}),
+            }));
+        }
+        _ = try ctx.render();
+        // Click each header in turn, on the frame just drawn.
+        if (frame < clicked.len) tap(&ctx, ctx.last_bounds.get(ctx.last_focusables.items[frame * 2 + 1]).?.rect.center());
+    }
+    try std.testing.expectEqual(@as([8]u32, @splat(1)), clicked);
 }
 
 test "contexts made with initWithFont share the first one's font and leave freeing it to it" {
