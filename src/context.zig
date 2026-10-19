@@ -103,6 +103,9 @@ pub const Context = struct {
     viewport: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// Open containers; the first entry is the frame root.
     stack: std.ArrayList(Open) = .empty,
+    /// Popups, tooltips and dialogs this frame, drawn over the page. Kept out of the root's own
+    /// children so that opening one doesn't change the ids of the widgets declared after it.
+    overlays: std.ArrayList(*L.Element) = .empty,
     /// First failure during the frame, returned by `render` so widget calls need no `try`.
     err: ?anyerror = null,
     /// Screen-reader bridge; created by `attachAccessibility` (the SDL3 adapter does this for you).
@@ -297,6 +300,7 @@ pub const Context = struct {
         self.focusables = .empty;
         self.viewport = viewport;
         self.stack = .empty;
+        self.overlays = .empty;
         self.err = null;
         self.wants_text = false;
         self.text_fields = .empty;
@@ -372,7 +376,7 @@ pub const Context = struct {
                 modal.id = open.id;
                 modal.overlay = .viewport;
                 modal.style.z_index = 300;
-                self.appendTo(0, modal);
+                self.appendOverlay(modal);
             },
         }
     }
@@ -456,7 +460,7 @@ pub const Context = struct {
     pub fn tooltip(self: *Context, value: []const u8) void {
         const anchor = self.last_added orelse return;
         if (anchor.id == 0 or anchor.id != self.hoveredWidget()) return;
-        self.appendTo(0, W.tooltipAt(self.builder(), anchor, value) catch |e| return self.fail(e));
+        self.appendOverlay(W.tooltipAt(self.builder(), anchor, value) catch |e| return self.fail(e));
     }
 
     // Controls ----------------------------------------------------------------
@@ -591,7 +595,7 @@ pub const Context = struct {
             const choices = self.arena.allocator().alloc(W.Choice, options.len) catch |e| return self.failed(e);
             for (choices, options, 0..) |*choice, option, i| choice.* = .{ .id = itemId(widget, i), .label = option };
             const hot = self.hoveredWidget();
-            if (W.dropdownMenu(b, trigger, choices, hot, true) catch |e| return self.failed(e)) |menu| self.appendTo(0, menu);
+            if (W.dropdownMenu(b, trigger, choices, hot, true) catch |e| return self.failed(e)) |menu| self.appendOverlay(menu);
             for (choices) |choice| self.focusables.append(self.arena.allocator(), choice.id) catch |e| return self.failed(e);
         }
         return changed;
@@ -761,7 +765,11 @@ pub const Context = struct {
         self.last_render_ms = self.time_ms;
         const b = self.builder();
         const inset = self.pagePadding();
-        const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = inset, .right = inset, .top = inset, .bottom = inset }, .gap = self.gap(), .overflow = .scroll }, .none, self.stack.items[0].children.items);
+        const page = self.stack.items[0].children.items;
+        const children = try self.arena.allocator().alloc(*L.Element, page.len + self.overlays.items.len);
+        @memcpy(children[0..page.len], page);
+        @memcpy(children[page.len..], self.overlays.items);
+        const root = try b.node(0, .{ .width = self.viewport.w, .height = self.viewport.h, .padding = .{ .left = inset, .right = inset, .top = inset, .bottom = inset }, .gap = self.gap(), .overflow = .scroll }, .none, children);
         root.scroll = &self.scroll;
         self.scroll.overlay_bar = true;
         root.layout(self.viewport, self.font);
@@ -826,6 +834,12 @@ pub const Context = struct {
 
     fn append(self: *Context, value: *L.Element) void {
         self.appendTo(self.stack.items.len - 1, value);
+    }
+
+    fn appendOverlay(self: *Context, value: *L.Element) void {
+        if (self.err != null) return;
+        self.overlays.append(self.arena.allocator(), value) catch |e| return self.fail(e);
+        self.last_added = value;
     }
 
     fn appendTo(self: *Context, depth: usize, value: *L.Element) void {
@@ -1136,6 +1150,36 @@ fn tap(ctx: *Context, at: Vec2) void {
     ctx.handle(.{ .pointer_move = at });
     ctx.handle(.{ .pointer_down = .{ .position = at, .button = .left, .clicks = 1 } });
     ctx.handle(.{ .pointer_up = .{ .position = at, .button = .left } });
+}
+
+test "clicking a second select while one is open opens it in one click" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 600, .h = 800 };
+    const State = struct {
+        first: usize = 0,
+        second: usize = 0,
+        fn frame(c: *Context, v: Rect, s: *@This()) !void {
+            c.newFrame(v);
+            c.begin(.row);
+            _ = c.select("First", &.{ "A", "B" }, &s.first);
+            _ = c.select("Second", &.{ "C", "D" }, &s.second);
+            c.end();
+            _ = try c.render();
+        }
+    };
+    var s: State = .{};
+    try State.frame(&ctx, viewport, &s);
+    const first = ctx.last_focusables.items[0];
+    const second = ctx.last_focusables.items[1];
+
+    // Open the first, then click the second's trigger: it takes over at once, not after a second click.
+    tap(&ctx, ctx.last_bounds.get(first).?.rect.center());
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqual(first, ctx.open_popup);
+    tap(&ctx, ctx.last_bounds.get(second).?.rect.center());
+    try State.frame(&ctx, viewport, &s);
+    try std.testing.expectEqual(second, ctx.open_popup);
 }
 
 test "a swipe that starts on a button scrolls the page instead of clicking" {
