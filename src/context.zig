@@ -1182,6 +1182,47 @@ test "clicking a second select while one is open opens it in one click" {
     try std.testing.expectEqual(second, ctx.open_popup);
 }
 
+test "a click outside closes the popup, and opening and closing it again leaves ids and overlays steady" {
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    const viewport = Rect{ .x = 0, .y = 0, .w = 600, .h = 800 };
+    const State = struct {
+        first: usize = 0,
+        second: usize = 0,
+        fn frame(c: *Context, v: Rect, s: *@This()) !void {
+            c.newFrame(v);
+            c.begin(.row);
+            _ = c.select("First", &.{ "A", "B" }, &s.first);
+            _ = c.select("Second", &.{ "C", "D" }, &s.second);
+            c.end();
+            c.text("Page");
+            _ = try c.render();
+        }
+    };
+    var s: State = .{};
+    try State.frame(&ctx, viewport, &s);
+    const first = ctx.last_focusables.items[0];
+    const second = ctx.last_focusables.items[1];
+    const outside = Vec2.init(viewport.w - 5, viewport.h - 5);
+
+    for (0..3) |_| {
+        // Open: the menu is the frame's only overlay and the other trigger keeps its id.
+        tap(&ctx, ctx.last_bounds.get(first).?.rect.center());
+        try State.frame(&ctx, viewport, &s);
+        try std.testing.expectEqual(first, ctx.open_popup);
+        try std.testing.expectEqual(@as(usize, 1), ctx.overlays.items.len);
+        try std.testing.expect(ctx.last_bounds.contains(second));
+
+        // A click away from the menu closes it, and the next frame has no overlay.
+        tap(&ctx, outside);
+        try State.frame(&ctx, viewport, &s);
+        try std.testing.expectEqual(@as(u32, 0), ctx.open_popup);
+        try std.testing.expectEqual(@as(usize, 0), ctx.overlays.items.len);
+        try std.testing.expectEqual(first, ctx.last_focusables.items[0]);
+        try std.testing.expectEqual(second, ctx.last_focusables.items[1]);
+    }
+}
+
 test "a swipe that starts on a button scrolls the page instead of clicking" {
     var ctx = try Context.init(std.testing.allocator);
     defer ctx.deinit();
