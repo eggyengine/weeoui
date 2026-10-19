@@ -337,32 +337,34 @@ const android_manifest =
     \\
 ;
 
-/// Screen-reader support is on for desktop targets: link AccessKit's prebuilt C library into Weeoui.
-/// On Windows it is a DLL; apps install `accesskit_dll` (a named lazy path) next to their executable.
+/// Screen-reader support is on for desktop targets AccessKit ships a library for: link its
+/// prebuilt C library into Weeoui. Elsewhere (musl, or Linux on other architectures) Weeoui
+/// builds without it, as `accesskit.supported` says. On Windows it is a DLL; apps install
+/// `accesskit_dll` (a named lazy path) next to their executable.
 fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, target: std.Target) void {
     const accesskit = b.dependency("accesskit_c", .{});
     mod.addIncludePath(accesskit.path("include"));
     mod.link_libc = true;
-    // No Android or web build; `accesskit.supported` is false there.
+    // No Android, web, musl or other-architecture build: `accesskit.supported` is false there.
     if (target.abi.isAndroid() or target.os.tag == .emscripten) return;
     const msvc = target.abi == .msvc;
     const library = switch (target.os.tag) {
-        .linux => switch (target.cpu.arch) {
+        .linux => if (!target.abi.isGnu()) return else switch (target.cpu.arch) {
             .x86_64 => "lib/linux/x86_64/static/libaccesskit.a",
             .x86 => "lib/linux/x86/static/libaccesskit.a",
-            else => @panic("AccessKit C 0.23.0 has no bundled Linux library for this architecture"),
+            else => return,
         },
         .windows => switch (target.cpu.arch) {
             .x86_64 => if (msvc) "lib/windows/x86_64/msvc/shared/accesskit.lib" else "lib/windows/x86_64/mingw/shared/libaccesskit.a",
             .aarch64 => "lib/windows/arm64/msvc/shared/accesskit.lib",
-            else => @panic("AccessKit C 0.23.0 has no bundled Windows library for this architecture"),
+            else => return,
         },
         .macos => switch (target.cpu.arch) {
             .x86_64 => "lib/macos/x86_64/static/libaccesskit.a",
             .aarch64 => "lib/macos/arm64/static/libaccesskit.a",
-            else => @panic("AccessKit C 0.23.0 has no bundled macOS library for this architecture"),
+            else => return,
         },
-        else => @panic("AccessKit is supported only on desktop Linux, macOS, and Windows"),
+        else => return,
     };
     mod.addObjectFile(accesskit.path(library));
     switch (target.os.tag) {

@@ -10,9 +10,12 @@ const c = @cImport({
 
 const text_run_id: u64 = @as(u64, 1) << 63;
 
-/// Whether this target has an AccessKit adapter. Android reports `.linux` but has no AT-SPI.
+/// Whether this target has an AccessKit adapter: one AccessKit ships a library for (keep in
+/// step with `linkAccessKit` in build.zig). Android reports `.linux` but has no AT-SPI; Linux
+/// has libraries for glibc on x86 and x86-64 only.
 pub const supported = !builtin.abi.isAndroid() and switch (builtin.os.tag) {
-    .linux, .windows, .macos => true,
+    .linux => builtin.abi.isGnu() and (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .x86),
+    .windows, .macos => builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64,
     else => false,
 };
 const os: std.Target.Os.Tag = if (supported) builtin.os.tag else .other;
