@@ -797,17 +797,16 @@ pub const Context = struct {
             canvas.hot_id = self.hoveredWidget();
             self.cursor = if (root.find(canvas.hot_id)) |hot| hot.cursorFor() else .default;
             if (root.draw(&canvas)) {
-                if (self.debug_hitboxes) root.drawHitboxes(&canvas) catch |e| switch (e) {
-                    error.OutOfVertices => {
-                        try self.vertices.ensureTotalCapacity(self.gpa, self.vertices.capacity * 2);
-                        continue;
-                    },
-                    else => return e,
+                if (self.debug_hitboxes) root.drawHitboxes(&canvas) catch |e| {
+                    if (!canvas.out_of_vertices) return e;
+                    try self.vertices.ensureTotalCapacity(self.gpa, self.vertices.capacity * 2);
+                    continue;
                 };
                 return canvas.items();
-            } else |e| switch (e) {
-                error.OutOfVertices => try self.vertices.ensureTotalCapacity(self.gpa, self.vertices.capacity * 2),
-                else => return e,
+            } else |e| {
+                // The canvas's flag, not the error, says it ran out: see `Canvas.out_of_vertices`.
+                if (!canvas.out_of_vertices) return e;
+                try self.vertices.ensureTotalCapacity(self.gpa, self.vertices.capacity * 2);
             }
         }
     }
@@ -1042,6 +1041,25 @@ test "counter button clicks against last frame's layout" {
     }
     try std.testing.expectEqual(@as(u32, 2), count);
     try std.testing.expect(!hints);
+}
+
+test "a draw that runs out of vertices is drawn again, whatever its error is called" {
+    // A callback from a hot-reloaded library returns its own error numbering: only the flag holds.
+    const Callback = struct {
+        var calls: u32 = 0;
+        fn draw(_: *const anyopaque, c: *Canvas, _: Rect) anyerror!void {
+            calls += 1;
+            if (calls > 1) return;
+            c.out_of_vertices = true;
+            return error.SomeOtherName;
+        }
+    };
+    var ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+    ctx.newFrame(.{ .x = 0, .y = 0, .w = 200, .h = 100 });
+    ctx.element(try ctx.builder().node(0, .{ .width = 10, .height = 10 }, .{ .custom = .{ .context = &Callback.calls, .draw = Callback.draw } }, &.{}));
+    _ = try ctx.render();
+    try std.testing.expectEqual(@as(u32, 2), Callback.calls);
 }
 
 test "slider drags, select picks, text input types, radio selects, dialog closes on escape" {

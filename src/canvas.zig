@@ -25,6 +25,10 @@ pub const Canvas = struct {
     hot_id: u32 = 0,
     /// Highlighted static text, painted behind the glyphs. Null (the default) for none.
     text_selection: ?types.TextSelection = null,
+    /// Set when a draw ran out of vertices: grow the buffer and draw again. Check this rather
+    /// than `error.OutOfVertices`, since a draw callback built in another binary (a hot-reloaded
+    /// library) numbers its errors differently.
+    out_of_vertices: bool = false,
 
     pub fn init(vertices: []Vertex, font: *const Font) Canvas {
         return .{ .vertices = vertices, .font = font };
@@ -204,7 +208,7 @@ pub const Canvas = struct {
                 if (count < 3) return;
             }
         }
-        if (self.len + (count - 2) * 3 > self.vertices.len) return error.OutOfVertices;
+        if (self.len + (count - 2) * 3 > self.vertices.len) return self.ranOut();
         const uv = [2]f32{ solid_uv.x, solid_uv.y };
         for (1..count - 1) |i| for ([_]usize{ 0, i, i + 1 }) |j| {
             const c = polygon[j].c;
@@ -216,12 +220,16 @@ pub const Canvas = struct {
             self.len += 1;
         };
     }
+    fn ranOut(self: *Canvas) error{OutOfVertices} {
+        self.out_of_vertices = true;
+        return error.OutOfVertices;
+    }
     const solid_uv = Rect{ .x = 0.5 / @as(f32, atlas_width), .y = 0.5 / @as(f32, atlas_height), .w = 0, .h = 0 };
     fn quad(self: *Canvas, r: Rect, uv: Rect, color: Color, alpha: f32, mode: f32) !void {
         if (r.w <= 0 or r.h <= 0) return;
         const visible = if (self.clip) |clip| r.intersection(clip) else r;
         if (visible.w <= 0 or visible.h <= 0) return;
-        if (self.len + 6 > self.vertices.len) return error.OutOfVertices;
+        if (self.len + 6 > self.vertices.len) return self.ranOut();
         const rgba: [4]f32 = .{
             if (self.srgb_target) types.linearChannel(color[0]) else color[0],
             if (self.srgb_target) types.linearChannel(color[1]) else color[1],
@@ -253,6 +261,7 @@ test "rectangle hit testing and geometry" {
     try canvas.rect(r, .{ 1, 1, 1 });
     try std.testing.expectEqual(@as(usize, 6), canvas.items().len);
     try std.testing.expectError(error.OutOfVertices, canvas.rect(r, .{ 1, 1, 1 }));
+    try std.testing.expect(canvas.out_of_vertices);
 }
 
 test "text ink is centered in its rectangle" {
