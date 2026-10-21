@@ -88,6 +88,8 @@ const Dynamic = struct {
     face: c.FT_Face,
     emoji_face: ?c.FT_Face = null,
     emoji_bytes: ?[]u8 = null,
+    /// Icons for private-use characters the main face lacks (a Nerd Font's); see `setSymbolsFont`.
+    symbols_face: ?c.FT_Face = null,
     glyphs: std.AutoHashMapUnmanaged(u64, Glyph) = .empty,
     /// Whose atlas this face draws into: itself, or the owner of a companion font (see
     /// `Font.initCompanion`), whose shelves, version and full warning it then uses.
@@ -153,6 +155,11 @@ fn coverageByte(mode: u8, row: []const u8, x: usize) u8 {
         return row[i + 3];
     }
     return 0;
+}
+
+/// Whether `codepoint` is in a private-use area, where icon fonts put their glyphs.
+fn isPrivateUse(codepoint: u21) bool {
+    return (codepoint >= 0xe000 and codepoint <= 0xf8ff) or codepoint >= 0xf0000;
 }
 
 /// A glyph drawn by the platform's own text renderer: straight RGBA, `width * height * 4` bytes.
@@ -290,6 +297,7 @@ pub const Font = struct {
         const dynamic = self.dynamic;
         if (dynamic.emoji_face) |face| _ = c.FT_Done_Face(face);
         if (dynamic.emoji_bytes) |bytes| self.allocator.free(bytes);
+        if (dynamic.symbols_face) |face| _ = c.FT_Done_Face(face);
         _ = c.FT_Done_Face(dynamic.face);
         _ = c.FT_Done_FreeType(dynamic.library);
         dynamic.glyphs.deinit(self.allocator);
@@ -307,6 +315,16 @@ pub const Font = struct {
         if (self.dynamic.emoji_bytes) |old| self.allocator.free(old);
         self.dynamic.emoji_face = face;
         self.dynamic.emoji_bytes = bytes;
+    }
+
+    /// Draw private-use characters (U+E000-U+F8FF and the supplementary planes 15-16, where Nerd
+    /// Fonts put their icons) the main face lacks from the font in `bytes`, such as Symbols Nerd
+    /// Font. Text in other ranges never comes from it. Borrows `bytes`, which must outlive the font.
+    pub fn setSymbolsFont(self: *Font, bytes: []const u8) !void {
+        var face: c.FT_Face = undefined;
+        if (c.FT_New_Memory_Face(self.dynamic.library, bytes.ptr, @intCast(bytes.len), 0, &face) != 0) return error.InvalidFont;
+        if (self.dynamic.symbols_face) |old| _ = c.FT_Done_Face(old);
+        self.dynamic.symbols_face = face;
     }
 
     /// Load the platform's color emoji font, if one is installed. Returns whether it found one.
@@ -431,6 +449,11 @@ pub const Font = struct {
             if (c.FT_Load_Char(d.face, codepoint, c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_LIGHT) != 0) return error.GlyphLoadFailed;
             return self.packGray(d.face.*.glyph);
         }
+        if (isPrivateUse(codepoint)) if (d.symbols_face) |face| if (c.FT_Get_Char_Index(face, codepoint) != 0) {
+            if (c.FT_Set_Pixel_Sizes(face, 0, size) != 0) return error.InvalidFontSize;
+            if (c.FT_Load_Char(face, codepoint, c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_LIGHT) != 0) return error.GlyphLoadFailed;
+            return self.packGray(face.*.glyph);
+        };
         if (self.platform) |platform| if (platform.render(platform.context, self.allocator, codepoint, selected.size)) |drawn| {
             defer self.allocator.free(drawn.pixels);
             var packed_glyph = try self.packRgba(drawn.pixels, drawn.width, drawn.height);
@@ -641,6 +664,13 @@ test "packed bitmap rows expand to 8-bit coverage" {
     try std.testing.expectEqual(@as(u8, 0), coverageByte(gray4_mode, &gray4, 1));
     const bgra = [_]u8{ 0, 0, 0, 200 };
     try std.testing.expectEqual(@as(u8, 200), coverageByte(bgra_mode, &bgra, 0));
+}
+
+test "only private-use characters are looked up in the symbols font" {
+    try std.testing.expect(isPrivateUse(0xe0a0)); // Powerline's branch
+    try std.testing.expect(isPrivateUse(0xf0001)); // Material Design's first icon
+    try std.testing.expect(!isPrivateUse('A'));
+    try std.testing.expect(!isPrivateUse(0x2192)); // an arrow, which is text
 }
 
 test "a companion font draws into its owner's atlas and snaps to its own sizes" {
