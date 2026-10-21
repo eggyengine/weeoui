@@ -103,7 +103,7 @@ const Dynamic = struct {
 fn copyGray(pixels: []u8, stride: usize, at: [2]usize, bitmap: c.FT_Bitmap) void {
     const w: usize = @intCast(bitmap.width);
     const h: usize = @intCast(bitmap.rows);
-    if (w * h == 0) return;
+    if (w * h == 0 or bitmap.buffer == null) return;
     const source: [*]const u8 = @ptrCast(bitmap.buffer);
     const pitch: isize = bitmap.pitch;
     for (0..h) |row| {
@@ -111,6 +111,48 @@ fn copyGray(pixels: []u8, stride: usize, at: [2]usize, bitmap: c.FT_Bitmap) void
         const start = source_row * @as(usize, @intCast(@abs(pitch)));
         @memcpy(pixels[(at[1] + row) * stride + at[0] ..][0..w], source[start..][0..w]);
     }
+}
+
+/// Expand a 1-bit, 2-bit, 4-bit or BGRA strike into 8-bit coverage. Other modes stay blank.
+fn writeCoverage(pixels: []u8, stride: usize, at: [2]usize, bitmap: c.FT_Bitmap) void {
+    const w: usize = @intCast(bitmap.width);
+    const h: usize = @intCast(bitmap.rows);
+    if (w * h == 0 or bitmap.buffer == null) return;
+    const source: [*]const u8 = @ptrCast(bitmap.buffer);
+    const pitch: usize = @intCast(@abs(bitmap.pitch));
+    for (0..h) |row| {
+        const source_row = if (bitmap.pitch >= 0) row else h - 1 - row;
+        const bytes = source[source_row * pitch ..][0..pitch];
+        const dest = pixels[(at[1] + row) * stride + at[0] ..][0..w];
+        for (dest, 0..) |*pixel, x| pixel.* = coverageByte(bitmap.pixel_mode, bytes, x);
+    }
+}
+
+fn coverageByte(mode: u8, row: []const u8, x: usize) u8 {
+    if (mode == c.FT_PIXEL_MODE_MONO) {
+        const i = x / 8;
+        if (i >= row.len) return 0;
+        const bit: u3 = @intCast(7 - (x % 8));
+        return if ((row[i] >> bit) & 1 == 1) 255 else 0;
+    }
+    if (mode == c.FT_PIXEL_MODE_GRAY2) {
+        const i = x / 4;
+        if (i >= row.len) return 0;
+        const shift: u3 = @intCast(6 - 2 * (x % 4));
+        return ((row[i] >> shift) & 0x3) * 85;
+    }
+    if (mode == c.FT_PIXEL_MODE_GRAY4) {
+        const i = x / 2;
+        if (i >= row.len) return 0;
+        const shift: u3 = if (x % 2 == 0) 4 else 0;
+        return ((row[i] >> shift) & 0xF) * 17;
+    }
+    if (mode == c.FT_PIXEL_MODE_BGRA) {
+        const i = x * 4;
+        if (i + 3 >= row.len) return 0;
+        return row[i + 3];
+    }
+    return 0;
 }
 
 /// A glyph drawn by the platform's own text renderer: straight RGBA, `width * height * 4` bytes.
@@ -292,9 +334,11 @@ pub const Font = struct {
         const bitmap = slot.*.bitmap;
         const w: usize = @intCast(bitmap.width);
         const h: usize = @intCast(bitmap.rows);
-        if (bitmap.pixel_mode != c.FT_PIXEL_MODE_GRAY and w * h != 0) return error.UnsupportedGlyphBitmap;
         const at = self.dynamic.atlas.shelf.place(w, h) orelse return error.AtlasFull;
-        copyGray(self.pixels, atlas_width, at, bitmap);
+        // Embedded strikes keep their stored pixel mode. Expand them; a bad mode must not abort a frame.
+        if (w * h != 0 and bitmap.pixel_mode != c.FT_PIXEL_MODE_GRAY and bitmap.pixel_mode != c.FT_PIXEL_MODE_LCD and bitmap.pixel_mode != c.FT_PIXEL_MODE_LCD_V) {
+            writeCoverage(self.pixels, atlas_width, at, bitmap);
+        } else copyGray(self.pixels, atlas_width, at, bitmap);
         return .{
             .x = @intCast(at[0]),
             .y = @intCast(at[1]),
@@ -309,7 +353,14 @@ pub const Font = struct {
     /// Premultiplied BGRA from FreeType, box-filtered to `scale`, stored as straight RGBA.
     fn packColor(self: *const Font, slot: c.FT_GlyphSlot, scale: f32) !Glyph {
         const bitmap = slot.*.bitmap;
-        if (bitmap.pixel_mode != c.FT_PIXEL_MODE_BGRA) return error.UnsupportedGlyphBitmap;
+        // A color load can still come back mono or empty. Pack that as gray coverage.
+        if (bitmap.pixel_mode != c.FT_PIXEL_MODE_BGRA) {
+            var gray = try self.packGray(slot);
+            gray.left = @intFromFloat(@round(@as(f32, @floatFromInt(gray.left)) * scale));
+            gray.top = @intFromFloat(@round(@as(f32, @floatFromInt(gray.top)) * scale));
+            gray.advance *= scale;
+            return gray;
+        }
         const sw: usize = @intCast(bitmap.width);
         const sh: usize = @intCast(bitmap.rows);
         const w: usize = @max(1, @as(usize, @intFromFloat(@ceil(@as(f32, @floatFromInt(sw)) * scale))));
@@ -575,6 +626,21 @@ test "system color emoji rasterize into the color atlas when installed" {
         if (font.color_pixels[((@as(usize, g.y) + y) * color_atlas_size + g.x + x) * 4 + 3] > 200) opaque_texel = true;
     };
     try std.testing.expect(opaque_texel);
+}
+
+test "packed bitmap rows expand to 8-bit coverage" {
+    const mono_mode: u8 = @intCast(c.FT_PIXEL_MODE_MONO);
+    const gray4_mode: u8 = @intCast(c.FT_PIXEL_MODE_GRAY4);
+    const bgra_mode: u8 = @intCast(c.FT_PIXEL_MODE_BGRA);
+    const mono = [_]u8{0b10100000};
+    try std.testing.expectEqual(@as(u8, 255), coverageByte(mono_mode, &mono, 0));
+    try std.testing.expectEqual(@as(u8, 0), coverageByte(mono_mode, &mono, 1));
+    try std.testing.expectEqual(@as(u8, 255), coverageByte(mono_mode, &mono, 2));
+    const gray4 = [_]u8{0xF0};
+    try std.testing.expectEqual(@as(u8, 255), coverageByte(gray4_mode, &gray4, 0));
+    try std.testing.expectEqual(@as(u8, 0), coverageByte(gray4_mode, &gray4, 1));
+    const bgra = [_]u8{ 0, 0, 0, 200 };
+    try std.testing.expectEqual(@as(u8, 200), coverageByte(bgra_mode, &bgra, 0));
 }
 
 test "a companion font draws into its owner's atlas and snaps to its own sizes" {
