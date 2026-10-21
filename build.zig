@@ -46,6 +46,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod, .use_llvm = true }));
     const test_step = b.step("test", "Check Weeoui module");
     test_step.dependOn(&tests.step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("build/strip_debug_info.zig"), .target = b.graph.host }) })).step);
 
     // Opt-in so consumers without SDL never fetch it.
     var sdl3_dep: ?*std.Build.Dependency = null;
@@ -366,7 +367,7 @@ fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, target: std.Target) void
         },
         else => return,
     };
-    mod.addObjectFile(accesskit.path(library));
+    mod.addObjectFile(if (target.os.tag == .linux) withoutDebugInfo(b, accesskit.path(library)) else accesskit.path(library));
     switch (target.os.tag) {
         .linux => {
             mod.linkSystemLibrary("m", .{});
@@ -383,6 +384,20 @@ fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, target: std.Target) void
         },
         else => unreachable,
     }
+}
+
+/// A copy of the static library `archive` without its DWARF. AccessKit's is Rust's, whose references
+/// between units Zig 0.16 can't follow: linked in, it stops every stack trace of the binary
+/// resolving a single frame. Without it, only AccessKit's own frames go unnamed.
+// ponytail: drop once Zig's DWARF reader follows DW_FORM_ref_addr into other units.
+fn withoutDebugInfo(b: *std.Build, archive: std.Build.LazyPath) std.Build.LazyPath {
+    const tool = b.addExecutable(.{ .name = "strip_debug_info", .root_module = b.createModule(.{
+        .root_source_file = b.path("build/strip_debug_info.zig"),
+        .target = b.graph.host,
+    }) });
+    const run = b.addRunArtifact(tool);
+    run.addFileArg(archive);
+    return run.addOutputFileArg("libaccesskit.a");
 }
 
 /// `zig build docs`: Zig's HTML API docs for `mod` in zig-out/docs, which
