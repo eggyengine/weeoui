@@ -293,15 +293,36 @@ pub const Element = struct {
         }
         return next_layer;
     }
-    fn drawOverlayLayer(self: *const Element, c: *Canvas, z: i16) !void {
+    fn drawOverlayLayer(self: *const Element, c: *Canvas, z: i16) anyerror!void {
         if (self.overlay != null) {
-            if (self.style.z_index == z) try self.draw(c);
+            if (self.style.z_index != z) return;
+            // Its own contents first, then the popups inside it (a floating window's menus), so
+            // whatever the app paints into its contents afterwards stays beneath them.
+            try self.drawContents(c, true);
+            var after: ?i16 = null;
+            while (self.nestedOverlayLayerAfter(after)) |nested| {
+                for (0..self.children.len) |i| try self.paintChild(i).drawOverlayLayer(c, nested);
+                after = nested;
+            }
             return;
         }
         for (0..self.children.len) |i| try self.paintChild(i).drawOverlayLayer(c, z);
     }
-    fn drawBase(self: *const Element, c: *Canvas, skip_overlays: bool) !void {
+    /// The next overlay layer among this overlay's descendants (not itself) after `after`.
+    fn nestedOverlayLayerAfter(self: *const Element, after: ?i16) ?i16 {
+        var next_layer: ?i16 = null;
+        for (self.children) |child| {
+            if (child.overlayLayerAfter(after)) |z| next_layer = if (next_layer) |current| @min(current, z) else z;
+        }
+        return next_layer;
+    }
+    fn drawBase(self: *const Element, c: *Canvas, skip_overlays: bool) anyerror!void {
         if (skip_overlays and self.overlay != null) return;
+        return self.drawContents(c, skip_overlays);
+    }
+    /// Draw this element and its children, even when it is an overlay itself; with
+    /// `skip_overlays`, overlays below it are left for their layer.
+    fn drawContents(self: *const Element, c: *Canvas, skip_overlays: bool) anyerror!void {
         const previous = c.clip;
         c.clip = self.clip;
         defer c.clip = previous;
@@ -631,6 +652,36 @@ test "overlay layers paint globally in z order and scroll outside anchor bounds"
     try std.testing.expect(canvas.len >= 12);
     try std.testing.expectEqual(@as(f32, 1), canvas.items()[0].color[0]);
     try std.testing.expectEqual(@as(f32, 1), canvas.items()[canvas.len - 1].color[2]);
+}
+
+test "a popup inside an overlay paints after everything else in that overlay" {
+    var font = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = Builder{ .allocator = arena.allocator() };
+    const paint = struct {
+        fn draw(context: *const anyopaque, canvas: *Canvas, r: Rect) !void {
+            const color: *const types.Color = @ptrCast(@alignCast(context));
+            try canvas.rect(r, color.*);
+        }
+    }.draw;
+    const menu_color = types.Color{ 1, 0, 0 };
+    const content_color = types.Color{ 0, 0, 1 };
+    // A floating window: its tab bar holds a menu, and its content comes after the bar.
+    const menu = try b.node(0, .{ .width = 20, .height = 20, .z_index = 700 }, .{ .custom = .{ .context = &menu_color, .draw = paint } }, &.{});
+    menu.overlay = .{ .point = .init(10, 10) };
+    const bar = try b.node(0, .{ .height = 10 }, .none, &.{menu});
+    const content = try b.node(0, .{ .width = 40, .height = 40 }, .{ .custom = .{ .context = &content_color, .draw = paint } }, &.{});
+    const window = try b.node(0, .{ .width = 50, .height = 50, .z_index = 400 }, .none, &.{ bar, content });
+    window.overlay = .{ .point = .init(0, 0) };
+    const root = try b.node(0, .{}, .none, &.{window});
+    root.layout(.{ .x = 0, .y = 0, .w = 100, .h = 100 }, &font);
+    var vertices: [128]types.Vertex = undefined;
+    var canvas = Canvas.init(&vertices, &font);
+    try root.drawOverlays(&canvas);
+    try std.testing.expectEqual(@as(f32, 1), canvas.items()[0].color[2]);
+    try std.testing.expectEqual(@as(f32, 1), canvas.items()[canvas.len - 1].color[0]);
 }
 
 test "anchored popups disappear when their trigger scrolls fully out of view" {
