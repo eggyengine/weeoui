@@ -123,7 +123,7 @@ fn syncClipboard(ctx: *ui.Context, window: sdl3.video.Window) void {
     _ = window;
     if (ctx.copied) |text| {
         if (web) ui.web.copy(text) else {
-            const z = ctx.gpa.dupeZ(u8, text) catch return;
+            const z = ctx.gpa.dupeSentinel(u8, text, 0) catch return;
             defer ctx.gpa.free(z);
             sdl3.clipboard.setText(z) catch {};
         }
@@ -183,7 +183,7 @@ fn logcat(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptim
         extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
     };
     var buffer: [1024]u8 = undefined;
-    const text = std.fmt.bufPrintZ(&buffer, format, args) catch blk: {
+    const text = std.fmt.bufPrintSentinel(&buffer, format, args, 0) catch blk: {
         buffer[buffer.len - 1] = 0; // truncated
         break :blk buffer[0 .. buffer.len - 1 :0];
     };
@@ -341,13 +341,13 @@ pub fn windowAction(window: sdl3.video.Window, pressed: ui.titlebar.Button) bool
     return false;
 }
 
-var cursors: [@typeInfo(ui.Cursor).@"enum".fields.len]?sdl3.mouse.Cursor = @splat(null);
+var cursors: [@typeInfo(ui.Cursor).@"enum".field_names.len]?sdl3.mouse.Cursor = @splat(null);
 var current_cursor: ?ui.Cursor = null;
 
 /// Show `cursor`, creating each system cursor once. Cheap to call every frame.
 pub fn setCursor(cursor: ui.Cursor) void {
     if (current_cursor == cursor) return;
-    const i = @intFromEnum(cursor);
+    const i = @backingInt(cursor);
     if (cursors[i] == null) cursors[i] = sdl3.mouse.Cursor.initSystem(switch (cursor) {
         .default => .default,
         .pointer => .pointer,
@@ -484,9 +484,9 @@ fn modifiers(mod: sdl3.keycode.KeyModifier) ui.input.Modifiers {
 fn key(code: sdl3.keycode.Keycode) ?ui.input.Key {
     if (code == .return_key or code == .kp_enter) return .enter;
     if (code == .func12) return .f12;
-    inline for (@typeInfo(ui.input.Key).@"enum".fields) |field| {
-        if (comptime @hasField(sdl3.keycode.Keycode, field.name)) {
-            if (code == @field(sdl3.keycode.Keycode, field.name)) return @field(ui.input.Key, field.name);
+    inline for (@typeInfo(ui.input.Key).@"enum".field_names) |name| {
+        if (comptime @hasField(sdl3.keycode.Keycode, name)) {
+            if (code == @field(sdl3.keycode.Keycode, name)) return @field(ui.input.Key, name);
         }
     }
     return null;

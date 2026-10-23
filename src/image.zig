@@ -4,10 +4,7 @@ const std = @import("std");
 const font_zig = @import("font.zig");
 const Font = font_zig.Font;
 const Glyph = font_zig.Glyph;
-const c = @cImport({
-    @cInclude("stb_image.h");
-    @cInclude("stb_image_resize2.h");
-});
+const c = @import("stb_c");
 const log = std.log.scoped(.image);
 
 /// Largest side of one packed frame, in pixels.

@@ -37,10 +37,13 @@ jobs:
       - if: github.event_name != 'delete'
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
       # Zig 0.16 fetches .zip dependencies into the cache's tmp/ without creating it first.
       - if: github.event_name != 'delete'
         run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
+      # Zig's HTTP client sometimes drops GitHub's git connections (HttpConnectionClosing); retry.
+      - if: github.event_name != 'delete'
+        run: for i in 1 2 3 4; do zig build --fetch=all && break; sleep 10; done
       - if: github.event_name != 'delete'
         run: zig build docs
       # The gallery for the browser: Emscripten in ~/emsdk (where Vitellus looks), plus Dawn's
@@ -54,7 +57,7 @@ jobs:
           source ~/emsdk/emsdk_env.sh
           embuilder build emdawnwebgpu
       - if: github.event_name != 'delete'
-        run: zig build -Dtarget=wasm32-emscripten -Doptimize=ReleaseFast
+        run: zig build -Dtarget=wasm32-emscripten -Doptimize=fast
       - if: github.event_name != 'delete'
         id: pages
         uses: actions/configure-pages@v5

@@ -1,6 +1,6 @@
 //! FreeType rasterization into a grayscale atlas plus a color atlas for emoji.
 const std = @import("std");
-const c = @import("freetype").c;
+const c = @import("freetype_c");
 const Rect = @import("types.zig").Rect;
 const log = std.log.scoped(.font);
 
@@ -177,7 +177,7 @@ pub const Font = struct {
     pub const Strike = struct {
         size: f32 = 0,
         ascent: f32 = 0,
-        glyphs: [95]Glyph = [_]Glyph{.{}} ** 95,
+        glyphs: [95]Glyph = @splat(.{}),
         pub fn glyph(self: *const Strike, byte: u8) Glyph {
             return self.glyphs[if (byte >= 32 and byte <= 126) byte - 32 else '?' - 32];
         }
@@ -186,8 +186,8 @@ pub const Font = struct {
     pixels: []u8,
     /// RGBA, straight alpha, sRGB-encoded.
     color_pixels: []u8,
-    strikes: [strike_sizes.len]Strike = [_]Strike{.{}} ** strike_sizes.len,
-    icons: [icon_masks.len]Glyph = [_]Glyph{.{}} ** icon_masks.len,
+    strikes: [strike_sizes.len]Strike = @splat(.{}),
+    icons: [icon_masks.len]Glyph = @splat(.{}),
     corner: Glyph = .{},
     dpi_scale: f32 = 1,
     platform: ?PlatformRenderer = null,
@@ -509,7 +509,7 @@ pub const Font = struct {
         return self.strike(16).glyph(byte);
     }
     pub fn icon(self: *const Font, value: Icon) Glyph {
-        return self.icons[@intFromEnum(value)];
+        return self.icons[@backingInt(value)];
     }
     pub fn strike(self: *const Font, requested_size: f32) *const Strike {
         var best: usize = 0;

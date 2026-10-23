@@ -141,6 +141,6 @@ pub fn nextKeyboardInput(buffer: []u8) ?KeyboardInput {
 pub fn log(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
     var buffer: [1024]u8 = undefined;
     const prefix = "[" ++ @tagName(level) ++ "] " ++ (if (scope == .default) "" else @tagName(scope) ++ ": ");
-    const message = std.fmt.bufPrintZ(&buffer, prefix ++ format, args) catch "[log message too long]";
-    if (@intFromEnum(level) <= @intFromEnum(std.log.Level.warn)) emscripten_console_error(message) else emscripten_console_log(message);
+    const message = std.fmt.bufPrintSentinel(&buffer, prefix ++ format, args, 0) catch "[log message too long]";
+    if (@backingInt(level) <= @backingInt(std.log.Level.warn)) emscripten_console_error(message) else emscripten_console_log(message);
 }

@@ -96,7 +96,7 @@ pub const Prop = enum(u8) {
         };
     }
 };
-const prop_count = @typeInfo(Prop).@"enum".fields.len;
+const prop_count = @typeInfo(Prop).@"enum".field_names.len;
 
 const Value = union(enum) { number: f32, auto, choice: u8, text: []u8 };
 /// Edits to one element; null means "as the app built it".
@@ -236,11 +236,11 @@ fn applyValue(element: *L.Element, prop: Prop, value: Value) void {
         .grow => s.grow = f,
         .columns => s.columns = @intFromFloat(std.math.clamp(f, 0, 64)),
         .z_index => s.z_index = @intFromFloat(std.math.clamp(f, -30000, 30000)),
-        .direction => s.direction = @enumFromInt(choice),
-        .justify => s.justify = @enumFromInt(choice),
-        .align_items => s.align_items = @enumFromInt(choice),
+        .direction => s.direction = @fromBackingInt(@intCast(choice)),
+        .justify => s.justify = @fromBackingInt(@intCast(choice)),
+        .align_items => s.align_items = @fromBackingInt(@intCast(choice)),
         .wrap => s.wrap = choice == 1,
-        .overflow => s.overflow = @enumFromInt(choice),
+        .overflow => s.overflow = @fromBackingInt(@intCast(choice)),
         .rtl => s.rtl = switch (choice) {
             0 => null,
             1 => false,
@@ -335,7 +335,7 @@ pub const Devtools = struct {
         var changed = false;
         if (self.overrides.get(path)) |edits| {
             for (edits.values, 0..) |value, i| if (value) |v| {
-                applyValue(element, @enumFromInt(i), v);
+                applyValue(element, @fromBackingInt(@intCast(i)), v);
                 changed = true;
             };
         }
@@ -346,7 +346,7 @@ pub const Devtools = struct {
     fn setOverride(self: *Devtools, gpa: std.mem.Allocator, prop: Prop, value: Value) !void {
         const entry = try self.overrides.getOrPut(gpa, self.selected);
         if (!entry.found_existing) entry.value_ptr.* = .{};
-        const slot = &entry.value_ptr.values[@intFromEnum(prop)];
+        const slot = &entry.value_ptr.values[@backingInt(prop)];
         if (slot.*) |old| if (old == .text) gpa.free(old.text);
         slot.* = value;
         switch (value) {
@@ -372,25 +372,25 @@ pub const Devtools = struct {
     pub fn isField(self: *const Devtools, id: u32) bool {
         _ = self;
         if (id < prop_first or id >= prop_first + prop_count) return false;
-        return (@as(Prop, @enumFromInt(id - prop_first))).kind() != .choice;
+        return (@as(Prop, @fromBackingInt(@intCast(id - prop_first)))).kind() != .choice;
     }
     fn begin(self: *Devtools, prop: Prop) void {
         self.editing = prop;
-        const i = @intFromEnum(prop);
+        const i = @backingInt(prop);
         self.edit.set(self.shown[i][0..self.shown_len[i]]) catch self.edit.set("") catch unreachable;
         self.edit.selectAll();
     }
     /// Type into a property field; begins editing it with its current value.
     pub fn insertText(self: *Devtools, id: u32, text: []const u8) bool {
         if (!self.isField(id)) return false;
-        const prop: Prop = @enumFromInt(id - prop_first);
+        const prop: Prop = @fromBackingInt(@intCast(id - prop_first));
         if (self.editing != prop) self.begin(prop);
         _ = self.edit.insertFitting(text) catch {};
         return true;
     }
     pub fn editKey(self: *Devtools, gpa: std.mem.Allocator, id: u32, key: EditKey, extend: bool, word: bool) bool {
         if (!self.isField(id)) return false;
-        const prop: Prop = @enumFromInt(id - prop_first);
+        const prop: Prop = @fromBackingInt(@intCast(id - prop_first));
         if (key == .up or key == .down) {
             // Chrome-style stepping: 1, or 10 with Shift.
             if (prop.kind() == .text) return false;
@@ -418,7 +418,7 @@ pub const Devtools = struct {
     /// Enter: parse the field's text into an edit. Invalid numbers are rejected and logged.
     pub fn commit(self: *Devtools, gpa: std.mem.Allocator, id: u32) bool {
         if (!self.isField(id) or self.selected == 0) return false;
-        const prop: Prop = @enumFromInt(id - prop_first);
+        const prop: Prop = @fromBackingInt(@intCast(id - prop_first));
         if (self.editing != prop) return true;
         self.editing = null;
         const typed = std.mem.trim(u8, self.edit.text(), " ");
@@ -439,7 +439,7 @@ pub const Devtools = struct {
     }
     /// Focus left the field: apply what was typed, as Chrome does on blur.
     pub fn blur(self: *Devtools, gpa: std.mem.Allocator) void {
-        if (self.editing) |prop| _ = self.commit(gpa, prop_first + @intFromEnum(prop));
+        if (self.editing) |prop| _ = self.commit(gpa, prop_first + @backingInt(prop));
     }
     /// Escape while editing: drop the typed text. Returns whether an edit was open.
     pub fn cancel(self: *Devtools) bool {
@@ -468,11 +468,11 @@ pub const Devtools = struct {
                 self.collapse_all = true;
             },
             prop_first...prop_first + prop_count - 1 => {
-                const prop: Prop = @enumFromInt(id - prop_first);
+                const prop: Prop = @fromBackingInt(@intCast(id - prop_first));
                 if (prop.kind() != .choice) {
                     if (self.editing != prop) self.begin(prop);
                 } else if (self.selected != 0) {
-                    const next = (self.shown_choice[@intFromEnum(prop)] + 1) % @as(u8, @intCast(prop.choices().len));
+                    const next = (self.shown_choice[@backingInt(prop)] + 1) % @as(u8, @intCast(prop.choices().len));
                     self.setOverride(gpa, prop, .{ .choice = next }) catch {};
                 }
             },
@@ -573,7 +573,7 @@ pub const Devtools = struct {
             .performance => try self.performance(b, page, area.w),
             .console => try self.consoleView(b, area.w, area.h),
         };
-        const result = try b.node(view_id + @intFromEnum(tool), .{ .width = area.w, .height = area.h }, .none, &.{body});
+        const result = try b.node(view_id + @backingInt(tool), .{ .width = area.w, .height = area.h }, .none, &.{body});
         result.accessibility = .{ .role = .region, .label = switch (tool) {
             .elements => "Elements",
             .performance => "Performance",
@@ -653,9 +653,8 @@ pub const Devtools = struct {
     fn styles(self: *Devtools, b: L.Builder, element: *const L.Element) !*L.Element {
         var fields: std.ArrayList(*L.Element) = .empty;
         const edits = self.overrides.get(self.selected);
-        inline for (@typeInfo(Prop).@"enum".fields) |field| {
-            const prop: Prop = @enumFromInt(field.value);
-            const i = field.value;
+        inline for (comptime std.enums.values(Prop)) |prop| {
+            const i = @backingInt(prop);
             var buffer: [128]u8 = undefined;
             const current = if (edits != null and edits.?.values[i] != null and prop == .hidden) "true" else describe(&buffer, element, prop);
             // Remember what was shown so edits can start from it between frames.
@@ -923,7 +922,7 @@ test "property edits persist across rebuilds and can be stepped, cycled, typed a
     var page = try frame.build(&font, &tools);
     try std.testing.expect(tools.activate(std.testing.allocator, row_first + 2)); // select the button
     page = try frame.build(&font, &tools);
-    const width_id = prop_first + @intFromEnum(Prop.width);
+    const width_id = prop_first + @backingInt(Prop.width);
     // Type a width.
     try std.testing.expect(tools.activate(std.testing.allocator, width_id));
     try std.testing.expect(tools.insertText(width_id, "200"));
@@ -935,12 +934,12 @@ test "property edits persist across rebuilds and can be stepped, cycled, typed a
     page = try frame.build(&font, &tools);
     try std.testing.expectEqual(@as(f32, 210), page.children[1].bounds.w);
     // Edit the label, then cycle a choice.
-    const text_id = prop_first + @intFromEnum(Prop.text);
+    const text_id = prop_first + @backingInt(Prop.text);
     try std.testing.expect(tools.insertText(text_id, "Ship it"));
     try std.testing.expect(tools.commit(std.testing.allocator, text_id));
     page = try frame.build(&font, &tools);
     try std.testing.expectEqualStrings("Ship it", page.children[1].paint_kind.button.label);
-    try std.testing.expect(tools.activate(std.testing.allocator, prop_first + @intFromEnum(Prop.hidden)));
+    try std.testing.expect(tools.activate(std.testing.allocator, prop_first + @backingInt(Prop.hidden)));
     page = try frame.build(&font, &tools);
     try std.testing.expectEqual(@as(f32, 0), page.children[1].bounds.h); // hidden
     // Bad numbers are refused and logged; "auto" clears a size.
@@ -951,7 +950,7 @@ test "property edits persist across rebuilds and can be stepped, cycled, typed a
     page = try frame.build(&font, &tools);
     try std.testing.expectEqual(@as(f32, 120), page.children[1].bounds.w);
     try std.testing.expectEqualStrings("Save", page.children[1].paint_kind.button.label);
-    try std.testing.expect(!tools.isField(prop_first + @intFromEnum(Prop.direction)));
+    try std.testing.expect(!tools.isField(prop_first + @backingInt(Prop.direction)));
 }
 
 test "the tree is one tab stop walked with arrow keys" {

@@ -62,7 +62,7 @@ pub fn TextEdit(comptime capacity: usize) type {
         len: usize = 0,
         cursor: usize = 0,
         anchor: usize = 0,
-        history: [16]Snapshot = [_]Snapshot{.{}} ** 16,
+        history: [16]Snapshot = @splat(.{}),
         history_len: usize = 0,
         history_pos: usize = 0,
         preferred_x: ?f32 = null,

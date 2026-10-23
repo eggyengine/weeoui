@@ -39,7 +39,7 @@ pub fn owns(id: u32) bool {
 /// The items of a tab stack's menu.
 const MenuAction = enum(u2) { pop_out, float, dock_back, close };
 fn menuItemId(stack: Index, action: MenuAction) u32 {
-    return menu_item_first + @as(u32, stack) * 4 + @intFromEnum(action);
+    return menu_item_first + @as(u32, stack) * 4 + @backingInt(action);
 }
 
 const max_nodes = 64;
@@ -129,7 +129,7 @@ const Home = struct {
 };
 
 pub const DockSpace = struct {
-    nodes: [max_nodes]Node = [_]Node{.{}} ** max_nodes,
+    nodes: [max_nodes]Node = @splat(.{}),
     homes: [max_homes]Home = @splat(.{}),
     root: Index = none,
     floating: [max_floating]?Floating = @splat(null),
@@ -572,7 +572,7 @@ pub const DockSpace = struct {
                 self.menu = none;
                 if (node.kind != .tabs or node.count == 0) return true;
                 const panel = node.panels[node.active];
-                switch (@as(MenuAction, @enumFromInt((id - menu_item_first) % 4))) {
+                switch (@as(MenuAction, @fromBackingInt(@intCast((id - menu_item_first) % 4)))) {
                     .pop_out => self.detach(panel) catch {},
                     .float => self.float(panel, self.floatRect(panel, node.rect.x + 40, node.rect.y + 40)) catch {},
                     .dock_back => self.redock(self.hostOf(index)),
@@ -582,7 +582,7 @@ pub const DockSpace = struct {
             window_button_first...window_button_first + max_floating * 3 - 1 => {
                 const i: u8 = @intCast((id - window_button_first) / 3);
                 const f = &(self.floating[i] orelse return true);
-                switch (@as(titlebar.Button, @enumFromInt((id - window_button_first) % 3))) {
+                switch (@as(titlebar.Button, @fromBackingInt(@intCast((id - window_button_first) % 3)))) {
                     .close => self.redock(.{ .floating = i }),
                     .minimize => f.minimized = !f.minimized,
                     .maximize => {
@@ -928,7 +928,7 @@ pub const DockSpace = struct {
         if (self.stackAt(t.pointer[0], t.pointer[1])) |index| {
             for (self.compass(index)) |button| {
                 const hovered = t.target != null and t.target.? == .node and t.target.?.node.index == index and t.target.?.node.side == button.side;
-                try layers.append(b.allocator, try hint(b, button.rect, drawCompass, &compass_contexts[@as(usize, @intFromEnum(button.side)) * 2 + @intFromBool(hovered)], 950));
+                try layers.append(b.allocator, try hint(b, button.rect, drawCompass, &compass_contexts[@as(usize, @backingInt(button.side)) * 2 + @intFromBool(hovered)], 950));
             }
         }
     }
@@ -939,7 +939,7 @@ const CompassButton = struct { side: Side, hovered: bool };
 const compass_contexts = blk: {
     var all: [10]CompassButton = undefined;
     for (0..5) |s| for (0..2) |h| {
-        all[s * 2 + h] = .{ .side = @enumFromInt(s), .hovered = h == 1 };
+        all[s * 2 + h] = .{ .side = @fromBackingInt(@intCast(s)), .hovered = h == 1 };
     };
     break :blk all;
 };
@@ -1126,9 +1126,9 @@ test "floating windows minimize to their tab bar, maximize over the main window,
     try dock.float(2, .{ .x = 100, .y = 100, .w = 300, .h = 200 });
     var root = try dock.build(b, .main, viewport, TestProvider{});
     root.layout(viewport, &font);
-    const close = window_button_first + @intFromEnum(titlebar.Button.close);
-    const minimize = window_button_first + @intFromEnum(titlebar.Button.minimize);
-    const maximize = window_button_first + @intFromEnum(titlebar.Button.maximize);
+    const close = window_button_first + @backingInt(titlebar.Button.close);
+    const minimize = window_button_first + @backingInt(titlebar.Button.minimize);
+    const maximize = window_button_first + @backingInt(titlebar.Button.maximize);
     try std.testing.expect(root.find(close) != null and root.find(maximize) != null);
     try std.testing.expect(root.find(close).?.bounds.x > root.find(minimize).?.bounds.x); // Windows order
     try std.testing.expect(dock.activate(minimize));

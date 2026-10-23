@@ -328,7 +328,7 @@ pub const Demo = struct {
     control_cursors: []ui.Cursor = &.{},
     scene_viewport: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     scene_clip: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    overlay_rects: [13]ui.Rect = [_]ui.Rect{.{ .x = 0, .y = 0, .w = 0, .h = 0 }} ** 13,
+    overlay_rects: [13]ui.Rect = @splat(.{ .x = 0, .y = 0, .w = 0, .h = 0 }),
 
     pub fn relayout(self: *Demo, allocator: std.mem.Allocator, viewport: ui.Rect, font: *const ui.Font) !void {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -477,8 +477,8 @@ pub const Demo = struct {
     /// F12: show the Elements and Performance panels beside the page, or take them away.
     pub fn toggleDevtools(self: *Demo) void {
         if (!self.docked) return;
-        const elements = @intFromEnum(Panel.elements);
-        const performance = @intFromEnum(Panel.performance);
+        const elements = @backingInt(Panel.elements);
+        const performance = @backingInt(Panel.performance);
         if (self.dock.nodeOf(elements) != null or self.dock.nodeOf(performance) != null) {
             self.dock.remove(elements);
             self.dock.remove(performance);
@@ -486,7 +486,7 @@ pub const Demo = struct {
             std.log.info("DevTools closed", .{});
             return;
         }
-        const near: ?u32 = if (self.dock.nodeOf(@intFromEnum(Panel.components)) != null) @intFromEnum(Panel.components) else null;
+        const near: ?u32 = if (self.dock.nodeOf(@backingInt(Panel.components)) != null) @backingInt(Panel.components) else null;
         self.dock.add(elements, near, .right) catch return;
         self.dock.add(performance, elements, .center) catch {};
         _ = self.dock.activate(ui.dock.first_id + elements);
@@ -1136,7 +1136,7 @@ pub const Demo = struct {
                     self.setScaleFromPointer(x);
                 },
                 color_first_id...color_first_id + 9 => {
-                    self.color.press(@enumFromInt(self.focusId() - color_first_id), self.controls[i], x, y);
+                    self.color.press(@fromBackingInt(@intCast(self.focusId() - color_first_id)), self.controls[i], x, y);
                     self.syncHex();
                 },
                 480 => {
@@ -1354,7 +1354,7 @@ pub const Demo = struct {
     }
     fn focusedChannel(self: *const Demo) ?ui.ColorChannel {
         const id = self.focusId();
-        return if (id >= color_first_id and id <= color_first_id + 9) @enumFromInt(id - color_first_id) else null;
+        return if (id >= color_first_id and id <= color_first_id + 9) @fromBackingInt(@intCast(id - color_first_id)) else null;
     }
     /// Up/Down: saturation on the wheel, the bar's own value on the vertical bars.
     pub fn adjustVertical(self: *Demo, direction: f32, fine: bool) bool {
@@ -1450,7 +1450,7 @@ pub const Demo = struct {
             },
             330, 331 => self.selected_radio = id,
             340, 341 => self.selected_view = id,
-            appearance_id...appearance_id + 2 => self.appearance = @enumFromInt(id - appearance_id),
+            appearance_id...appearance_id + 2 => self.appearance = @fromBackingInt(@intCast(id - appearance_id)),
             350 => self.submitForm(),
             351 => {
                 self.select_index = 0;
@@ -1590,7 +1590,7 @@ pub const Demo = struct {
                     },
                     menubar_first_id + 40...menubar_first_id + 42 => self.profile = id,
                     menubar_first_id + 45...menubar_first_id + 48 => if (self.docked) {
-                        const panel = id - (menubar_first_id + 45) + @intFromEnum(Panel.components);
+                        const panel = id - (menubar_first_id + 45) + @backingInt(Panel.components);
                         if (self.dock.nodeOf(panel) != null) self.dock.remove(panel) else self.dock.add(panel, null, .center) catch {};
                     },
                     menubar_first_id + 49 => self.toggleDevtools(),
@@ -1777,7 +1777,7 @@ pub const Demo = struct {
             },
             titlebar_first...titlebar_first + (ui.dock.max_windows + 1) * 4 - 1 => {
                 const part = (id - titlebar_first) % 4;
-                if (part < 3) self.window_request = .{ .slot = @intCast((id - titlebar_first) / 4), .button = @enumFromInt(part) };
+                if (part < 3) self.window_request = .{ .slot = @intCast((id - titlebar_first) / 4), .button = @fromBackingInt(@intCast(part)) };
             },
             else => if (!self.dock.activate(id) and !self.devtools.activate(devtools_gpa, id)) std.log.warn("Unimplemented demo control: {d}", .{id}),
         }
@@ -1859,7 +1859,7 @@ const DockPanels = struct {
     font: *const ui.Font,
 
     pub fn title(_: DockPanels, panel: u32) []const u8 {
-        return switch (@as(Panel, @enumFromInt(panel))) {
+        return switch (@as(Panel, @fromBackingInt(@intCast(panel)))) {
             .components => "Components",
             .scene => "Scene",
             .console => "Console",
@@ -1869,7 +1869,7 @@ const DockPanels = struct {
         };
     }
     pub fn content(self: DockPanels, b: L.Builder, panel: u32, rect: ui.Rect) !*L.Element {
-        switch (@as(Panel, @enumFromInt(panel))) {
+        switch (@as(Panel, @fromBackingInt(@intCast(panel)))) {
             .components => return layoutPage(b, self.demo, rect, self.count_buf, self.font),
             .scene => {
                 const scene = try b.node(500, .{ .width = rect.w, .height = rect.h }, sceneMarker(self.demo), &.{});
@@ -1882,7 +1882,7 @@ const DockPanels = struct {
                 const slot = try b.node(0, .{ .width = rect.w, .height = rect.h }, .none, &.{});
                 const demo = self.demo;
                 if (demo.tool_slot_count < demo.tool_slots.len) {
-                    demo.tool_slots[demo.tool_slot_count] = .{ .tool = switch (@as(Panel, @enumFromInt(panel))) {
+                    demo.tool_slots[demo.tool_slot_count] = .{ .tool = switch (@as(Panel, @fromBackingInt(@intCast(panel)))) {
                         .elements => .elements,
                         .performance => .performance,
                         else => .console,
@@ -1900,10 +1900,10 @@ fn layoutDock(b: L.Builder, demo: *Demo, viewport: ui.Rect, count_buf: *[20]u8, 
     if (!demo.dock_ready) {
         demo.dock_ready = true;
         const dock = &demo.dock;
-        try dock.add(@intFromEnum(Panel.components), null, .center);
-        try dock.add(@intFromEnum(Panel.scene), @intFromEnum(Panel.components), .right);
-        try dock.add(@intFromEnum(Panel.console), @intFromEnum(Panel.scene), .bottom);
-        try dock.add(@intFromEnum(Panel.notes), @intFromEnum(Panel.console), .center);
+        try dock.add(@backingInt(Panel.components), null, .center);
+        try dock.add(@backingInt(Panel.scene), @backingInt(Panel.components), .right);
+        try dock.add(@backingInt(Panel.console), @backingInt(Panel.scene), .bottom);
+        try dock.add(@backingInt(Panel.notes), @backingInt(Panel.console), .center);
         dock.nodes[dock.root].ratio = 0.64;
         dock.nodes[dock.nodes[dock.root].second].ratio = 0.52;
     }
@@ -2083,7 +2083,7 @@ fn build(b: L.Builder, demo: *Demo, viewport: ui.Rect, count_buf: *[20]u8, verti
         slider,
         try line(b),
         try label(b, "Appearance", 15, true, false),
-        try ui.widgets.toggleGroup(b, &.{ .{ .id = appearance_id, .label = "System" }, .{ .id = appearance_id + 1, .label = "Light" }, .{ .id = appearance_id + 2, .label = "Dark" } }, &.{appearance_id + @as(u32, @intFromEnum(demo.appearance))}),
+        try ui.widgets.toggleGroup(b, &.{ .{ .id = appearance_id, .label = "System" }, .{ .id = appearance_id + 1, .label = "Light" }, .{ .id = appearance_id + 2, .label = "Dark" } }, &.{appearance_id + @as(u32, @backingInt(demo.appearance))}),
         try line(b),
         try b.node(0, .{ .direction = .row, .gap = 12, .align_items = .center }, .none, &.{
             try b.node(debug_id, .{ .height = 32 }, .{ .toggle_button = .{ .label = "Debug hitboxes", .pressed = demo.debug_hitboxes } }, &.{}),
@@ -2206,8 +2206,8 @@ fn menubarFor(b: L.Builder, demo: *Demo, placement: enum { card, window, titleba
             menubar_first_id + 31 => demo.full_urls,
             menubar_first_id + 36 => demo.menubar_autohide,
             menubar_first_id + 37 => demo.selectable_text,
-            menubar_first_id + 45...menubar_first_id + 48 => demo.dock.nodeOf(row.id - (menubar_first_id + 45) + @intFromEnum(Panel.components)) != null,
-            menubar_first_id + 49 => demo.dock.nodeOf(@intFromEnum(Panel.elements)) != null or demo.dock.nodeOf(@intFromEnum(Panel.performance)) != null,
+            menubar_first_id + 45...menubar_first_id + 48 => demo.dock.nodeOf(row.id - (menubar_first_id + 45) + @backingInt(Panel.components)) != null,
+            menubar_first_id + 49 => demo.dock.nodeOf(@backingInt(Panel.elements)) != null or demo.dock.nodeOf(@backingInt(Panel.performance)) != null,
             menubar_first_id + 40...menubar_first_id + 42 => row.id == demo.profile,
             else => false,
         };
@@ -3315,11 +3315,11 @@ test "F12 docks the DevTools panels beside the page; Inspect picks without click
     const viewport = ui.Rect{ .x = 0, .y = 0, .w = 1400, .h = 900 };
     try demo.relayout(std.testing.allocator, viewport, &font);
     // Console starts as a panel, tabbed behind Notes; Elements and Performance come with F12.
-    try std.testing.expect(demo.dock.nodeOf(@intFromEnum(Panel.console)) != null);
-    try std.testing.expectEqual(@as(f32, 0), demo.tool_rects[@intFromEnum(ui.devtools.Tool.console)].w);
+    try std.testing.expect(demo.dock.nodeOf(@backingInt(Panel.console)) != null);
+    try std.testing.expectEqual(@as(f32, 0), demo.tool_rects[@backingInt(ui.devtools.Tool.console)].w);
     demo.toggleDevtools();
     try demo.relayout(std.testing.allocator, viewport, &font);
-    const elements = demo.tool_rects[@intFromEnum(ui.devtools.Tool.elements)];
+    const elements = demo.tool_rects[@backingInt(ui.devtools.Tool.elements)];
     try std.testing.expect(elements.w > 0);
     const button = demo.controls[demo.indexOf(button_id).?];
     try std.testing.expect(elements.x > button.x); // docked to the right of the page
@@ -3333,17 +3333,17 @@ test "F12 docks the DevTools panels beside the page; Inspect picks without click
     try std.testing.expect(demo.devtools.row_count > 500);
     // Performance is a tab in the same stack; drawing it works with frame history.
     for (0..90) |i| demo.tickScroll(0.01 + @as(f32, @floatFromInt(i % 7)) * 0.001);
-    _ = demo.dock.activate(ui.dock.first_id + @intFromEnum(Panel.performance));
+    _ = demo.dock.activate(ui.dock.first_id + @backingInt(Panel.performance));
     const vertices = try std.testing.allocator.alloc(ui.Vertex, 250_000);
     defer std.testing.allocator.free(vertices);
     var canvas = ui.Canvas.init(vertices, &font);
     _ = try demo.draw(std.testing.allocator, &canvas, viewport);
-    try std.testing.expect(demo.tool_rects[@intFromEnum(ui.devtools.Tool.performance)].w > 0);
+    try std.testing.expect(demo.tool_rects[@backingInt(ui.devtools.Tool.performance)].w > 0);
     try std.testing.expect(demo.devtools.vertices > 0);
     // F12 again takes them away.
     demo.toggleDevtools();
     try demo.relayout(std.testing.allocator, viewport, &font);
-    try std.testing.expectEqual(@as(f32, 0), demo.tool_rects[@intFromEnum(ui.devtools.Tool.elements)].w);
+    try std.testing.expectEqual(@as(f32, 0), demo.tool_rects[@backingInt(ui.devtools.Tool.elements)].w);
 }
 
 test "DevTools edits stick to the rebuilt page" {
@@ -3360,12 +3360,12 @@ test "DevTools edits stick to the rebuilt page" {
     demo.devtools.inspecting = true;
     demo.pointerDown(button.center().x, button.center().y);
     try demo.relayout(std.testing.allocator, viewport, &font);
-    const text_field = ui.devtools.first_id + 200 + @intFromEnum(ui.devtools.Prop.text);
+    const text_field = ui.devtools.first_id + 200 + @backingInt(ui.devtools.Prop.text);
     try std.testing.expect(demo.accessibilityAction(text_field, .click));
     try std.testing.expect(demo.isEditing());
     try std.testing.expect(demo.insertText("Edited"));
     try std.testing.expect(demo.commitEdit());
-    const width_field = ui.devtools.first_id + 200 + @intFromEnum(ui.devtools.Prop.width);
+    const width_field = ui.devtools.first_id + 200 + @backingInt(ui.devtools.Prop.width);
     try std.testing.expect(demo.accessibilityAction(width_field, .focus));
     try std.testing.expect(demo.editKey(.up, true, false, &font)); // +10
     try demo.relayout(std.testing.allocator, viewport, &font);
@@ -3411,10 +3411,10 @@ test "docked editor pops panels into windows that share one control list, and do
     // Components (the page) sits left of the Scene panel, which holds the 3D view.
     const button = demo.controls[demo.indexOf(button_id).?];
     try std.testing.expect(demo.scene_viewport.w > 0 and demo.scene_viewport.x > button.x);
-    const scene_tab = ui.dock.first_id + @intFromEnum(Panel.scene);
+    const scene_tab = ui.dock.first_id + @backingInt(Panel.scene);
     try std.testing.expect(demo.indexOf(scene_tab) != null);
     // Pop the Scene out; once the app reports its window size, its tree joins the controls.
-    try demo.dock.detach(@intFromEnum(Panel.scene));
+    try demo.dock.detach(@backingInt(Panel.scene));
     demo.window_sizes[0] = .{ 500, 400 };
     try demo.relayout(std.testing.allocator, viewport, &font);
     try std.testing.expect(demo.scene_viewport.x >= windowOrigin(0));
@@ -3447,11 +3447,11 @@ test "custom title bars follow the desktop's button layout and request window ac
     try std.testing.expect(demo.frames[0].buttons[0].x > viewport.w / 2);
     try std.testing.expect(demo.indexOf(ui.titlebar.id(titlebar_first, 0, .minimize)) == null);
     // Everything else starts below it.
-    try std.testing.expect(demo.controls[demo.indexOf(ui.dock.first_id + @intFromEnum(Panel.components)).?].y >= ui.titlebar.height);
+    try std.testing.expect(demo.controls[demo.indexOf(ui.dock.first_id + @backingInt(Panel.components)).?].y >= ui.titlebar.height);
     try std.testing.expect(demo.accessibilityAction(ui.titlebar.id(titlebar_first, 0, .close), .click));
     try std.testing.expectEqual(ui.titlebar.Button.close, demo.window_request.?.button);
     // A popped-out panel gets its own bar in its own slot, with window-local coordinates.
-    try demo.dock.detach(@intFromEnum(Panel.notes));
+    try demo.dock.detach(@backingInt(Panel.notes));
     demo.window_sizes[0] = .{ 400, 300 };
     try demo.relayout(std.testing.allocator, viewport, &font);
     try std.testing.expectEqual(@as(f32, 0), demo.frames[1].bar.x);
@@ -3474,7 +3474,7 @@ test "title bar menus share the row with the buttons and collapse behind a hambu
     try std.testing.expect(demo.accessibilityAction(menubar_first_id + 1, .click));
     try demo.relayout(std.testing.allocator, .{ .x = 0, .y = 0, .w = 1200, .h = 800 }, &font);
     try std.testing.expect(demo.popupOpen());
-    const tab = demo.controls[demo.indexOf(ui.dock.first_id + @intFromEnum(Panel.components)).?];
+    const tab = demo.controls[demo.indexOf(ui.dock.first_id + @backingInt(Panel.components)).?];
     demo.pointerDown(tab.x + 4, tab.y + 4);
     demo.pointerUp();
     try std.testing.expectEqual(@as(u32, 0), demo.menubar_open);
@@ -3529,7 +3529,7 @@ test "the 3D view is drawn right after its panel, even when the panel floats" {
     try std.testing.expect(docked > 0 and docked <= canvas.len);
     // Floating, the panel's window is an overlay: the split must come after its background,
     // not at the end of the docked layer (where the window would paint over the scene).
-    try demo.dock.float(@intFromEnum(Panel.scene), .{ .x = 200, .y = 200, .w = 400, .h = 300 });
+    try demo.dock.float(@backingInt(Panel.scene), .{ .x = 200, .y = 200, .w = 400, .h = 300 });
     try demo.relayout(std.testing.allocator, viewport, &font);
     canvas.len = 0;
     const floating = try demo.draw(std.testing.allocator, &canvas, viewport);
@@ -3606,7 +3606,7 @@ test "the Windows menu closes and reopens dock panels" {
     defer demo.deinit();
     const viewport = ui.Rect{ .x = 0, .y = 0, .w = 1200, .h = 800 };
     try demo.relayout(std.testing.allocator, viewport, &font);
-    const scene = @intFromEnum(Panel.scene);
+    const scene = @backingInt(Panel.scene);
     for ([_]bool{ false, true }) |open| {
         demo.activateId(menubar_first_id + 5);
         try demo.relayout(std.testing.allocator, viewport, &font);

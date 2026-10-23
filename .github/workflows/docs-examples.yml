@@ -15,7 +15,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
       # Zig 0.16 fetches .zip dependencies into the cache's tmp/ without creating it first.
       - run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
+      # Zig's HTTP client sometimes drops GitHub's git connections (HttpConnectionClosing); retry.
+      - run: for i in 1 2 3 4; do zig build --fetch=all && break; sleep 10; done
       - run: docs/examples/check.sh
