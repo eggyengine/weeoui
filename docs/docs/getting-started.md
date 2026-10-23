@@ -5,7 +5,7 @@ title: Getting started
 
 # Getting started
 
-Weeoui requires Zig `0.16.0`.
+Weeoui requires Zig `0.17.0`.
 
 ## Add the dependency
 

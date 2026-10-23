@@ -805,7 +805,7 @@ fn firstWeekday(year: u16, month: u8) u8 {
 
 fn daysInMonth(date: Date) !u8 {
     if (date.year == 0 or date.year > 9999 or date.month < 1 or date.month > 12 or date.hour > 23 or date.minute > 59) return error.InvalidDate;
-    const days: u8 = @intCast(std.time.epoch.getDaysInMonth(date.year, @enumFromInt(date.month)));
+    const days: u8 = @intCast(std.time.epoch.getDaysInMonth(date.year, @fromBackingInt(@intCast(date.month))));
     if (date.day > days) return error.InvalidDate;
     return days;
 }

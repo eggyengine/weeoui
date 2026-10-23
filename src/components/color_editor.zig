@@ -56,7 +56,7 @@ pub const ColorEditor = struct {
             .alpha => self.alpha = v,
             .red, .green, .blue => {
                 var l = self.linear();
-                l[@intFromEnum(channel) - @intFromEnum(Channel.red)] = v;
+                l[@backingInt(channel) - @backingInt(Channel.red)] = v;
                 self.hsv = Hsv.fromRgb(.{ types.srgbChannel(l[0]), types.srgbChannel(l[1]), types.srgbChannel(l[2]) }, self.hsv.h);
             },
         }

@@ -2,7 +2,7 @@
 //! native. Android 13+ ships only COLRv1 emoji, which FreeType can't rasterize.
 const std = @import("std");
 const ui = @import("weeoui");
-const c = @cImport(@cInclude("jni.h"));
+const c = @import("jni");
 
 /// `env` is the calling thread's `JNIEnv*` (e.g. `SDL_GetAndroidJNIEnv()`); glyphs draw on that thread.
 pub fn renderer(env: *anyopaque) ui.PlatformRenderer {

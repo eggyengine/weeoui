@@ -57,7 +57,7 @@ pub const Layout = struct {
 
 /// Ids from `first_id` for window `slot`: + 0 close, + 1 minimize, + 2 maximize, + 3 the bar.
 pub fn id(first_id: u32, slot: u32, part: enum(u2) { close, minimize, maximize, bar }) u32 {
-    return first_id + slot * 4 + @intFromEnum(part);
+    return first_id + slot * 4 + @backingInt(part);
 }
 
 pub const State = struct { maximized: bool = false, focused: bool = true };
@@ -79,7 +79,7 @@ pub fn barWithMenus(b: L.Builder, first_id: u32, slot: u32, title: []const u8, l
     const group = struct {
         fn make(builder: L.Builder, list: *std.ArrayList(*L.Element), buttons: [3]?Button, l: Layout, s: State, first: u32, window: u32) !void {
             var row: std.ArrayList(*L.Element) = .empty;
-            for (buttons) |slot_button| if (slot_button) |button| try row.append(builder.allocator, try buttonElement(builder, l.style, button, s, id(first, window, @enumFromInt(@intFromEnum(button)))));
+            for (buttons) |slot_button| if (slot_button) |button| try row.append(builder.allocator, try buttonElement(builder, l.style, button, s, id(first, window, @fromBackingInt(@intCast(@backingInt(button))))));
             try list.append(builder.allocator, try builder.node(0, .{ .direction = .row, .gap = if (l.style == .mac) 8 else if (l.style == .gnome) 12 else 0, .align_items = .center, .padding = .{ .left = if (l.style == .windows) 0 else 12, .right = if (l.style == .windows) 0 else 12 }, .height = height }, .none, row.items));
         }
     }.make;
@@ -103,7 +103,7 @@ pub fn barWithMenus(b: L.Builder, first_id: u32, slot: u32, title: []const u8, l
 /// `ids` gives each button's element id, indexed by `Button`.
 pub fn buttonRow(b: L.Builder, layout: Layout, side: enum { left, right }, state: State, ids: [3]u32) !*L.Element {
     var row: std.ArrayList(*L.Element) = .empty;
-    for (if (side == .left) layout.left else layout.right) |slot| if (slot) |button| try row.append(b.allocator, try buttonElement(b, layout.style, button, state, ids[@intFromEnum(button)]));
+    for (if (side == .left) layout.left else layout.right) |slot| if (slot) |button| try row.append(b.allocator, try buttonElement(b, layout.style, button, state, ids[@backingInt(button)]));
     return b.node(0, .{ .direction = .row, .gap = if (layout.style == .windows) 0 else 8, .align_items = .center, .padding = .{ .left = 4, .right = 4 } }, .none, row.items);
 }
 

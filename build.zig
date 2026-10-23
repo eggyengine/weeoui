@@ -3,9 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    // Browser builds (WebGPU) link with Emscripten; its sysroot must be set before any C dependency.
+    // Browser builds (WebGPU) link with Emscripten, whose headers C dependencies are handed.
     const web = target.result.os.tag == .emscripten;
-    const emscripten = if (web) (b.lazyImport(@This(), "vitellus") orelse return).Emscripten.init(b, target, b.option([]const u8, "emsdk", "Path to emsdk for web builds (default: $EMSDK, then ~/emsdk)")) else null;
+    const emscripten = if (web) (b.lazyImport(@This(), "vitellus") orelse return).Emscripten.init(b, b.option([]const u8, "emsdk", "Path to emsdk for web builds (default: $EMSDK, then ~/emsdk)")) else null;
     const mod = b.addModule("weeoui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -16,10 +16,16 @@ pub fn build(b: *std.Build) void {
     const freetype = b.dependency("freetype", .{ .target = target, .optimize = optimize, .@"enable-libpng" = true });
     const eggenvector = b.dependency("eggenvector", .{ .target = target, .optimize = optimize });
     mod.addImport("eggenvector", eggenvector.module("eggenvector"));
-    mod.addImport("freetype", freetype.module("freetype"));
+    const freetype_headers = freetype.artifact("freetype").getEmittedIncludeTree();
+    mod.addImport("freetype_c", translateC(b, target, freetype_headers.path(b, "freetype-zig.h"), freetype_headers));
     mod.linkLibrary(freetype.artifact("freetype"));
     // stb_image decodes PNG/JPEG/GIF/...; stb_image_resize2 fits them into the color atlas.
     const stb = b.dependency("stb", .{});
+    mod.addImport("stb_c", translateC(b, target, b.addWriteFiles().add("stb.h",
+        \\#define STBI_NO_STDIO
+        \\#include "stb_image.h"
+        \\#include "stb_image_resize2.h"
+    ), stb.path("")));
     mod.addIncludePath(stb.path(""));
     mod.addCSourceFile(.{
         .file = b.addWriteFiles().add("stb.c",
@@ -32,18 +38,11 @@ pub fn build(b: *std.Build) void {
         // stb relies on shifts that UBSan traps on.
         .flags = &.{"-fno-sanitize=undefined"},
     });
-    // Aro's `@cImport` rejects bionic's `_Nonnull` array parameters; zig-android-sdk does the same for translate-c.
-    if (target.result.abi.isAndroid()) {
-        for ([_]*std.Build.Module{ mod, freetype.module("freetype") }) |m| {
-            m.addCMacro("_Nonnull", "");
-            m.addCMacro("_Nullable", "");
-        }
-        makePic(freetype.artifact("freetype"));
-    }
-    linkAccessKit(b, mod, target.result);
+    if (target.result.abi.isAndroid()) makePic(freetype.artifact("freetype"));
+    linkAccessKit(b, mod, target);
     // Web apps that use `ui.web` link this with `emcc --js-library`.
     b.addNamedLazyPath("web_js", b.path("src/web.js"));
-    const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod, .use_llvm = true }));
+    const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod }));
     const test_step = b.step("test", "Check Weeoui module");
     test_step.dependOn(&tests.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("build/strip_debug_info.zig"), .target = b.graph.host }) })).step);
@@ -68,9 +67,10 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{ .{ .name = "weeoui", .module = mod }, .{ .name = "sdl3", .module = sdl3.module("sdl3") } },
-                .link_libc = true, // `@cImport("jni.h")` on Android
+                .link_libc = true,
             });
-            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = adapter.?, .use_llvm = true })).step);
+            if (target.result.abi.isAndroid()) adapter.?.addImport("jni", translateC(b, target, b.path("src/jni.h"), null));
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = adapter.? })).step);
         }
     }
     // Opt-in Vitellus renderer. Projects that already build Vitellus can instead compile
@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{ .{ .name = "weeoui", .module = mod }, .{ .name = "vitellus", .module = vitellus.module("vitellus") }, .{ .name = "vitellus_spirv", .module = vitellus.module("vitellus_spirv") } },
             });
-            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = renderer.?, .use_llvm = true })).step);
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = renderer.? })).step);
         }
     }
 
@@ -121,7 +121,7 @@ pub fn build(b: *std.Build) void {
         if (target.result.os.tag == .emscripten or target.result.abi.isAndroid()) return;
         for ([_][]const u8{ "examples/demo.zig", "examples/gallery/demo.zig" }) |file| {
             const tested = b.createModule(.{ .root_source_file = b.path(file), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "weeoui", .module = mod }, .{ .name = "weeoui_sdl3", .module = adapter.? } }, .link_libc = true });
-            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tested, .use_llvm = true })).step);
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tested })).step);
         }
     }
 }
@@ -207,29 +207,30 @@ fn buildApp(b: *std.Build, parts: Parts, options: AppOptions) void {
     const wb = parts.weeoui;
     if (target.result.os.tag == .emscripten) {
         const vitellus_build = wb.lazyImport(@This(), "vitellus") orelse return;
-        const page = vitellus_build.Emscripten.init(b, target, null).addApp(b, .{
+        const page = vitellus_build.Emscripten.init(b, null).addApp(b, .{
             .name = options.name,
             .root_module = root,
             .shell_file = wb.path("src/shell.html"),
             // The font atlases and Debug frames outgrow Vitellus's 1 MiB stack; web.js is `ui.web`.
-            .args = &.{ "-sSTACK_SIZE=8388608", "--js-library", wb.pathFromRoot("src/web.js") },
+            .js_libraries = &.{wb.path("src/web.js")},
+            .args = &.{"-sSTACK_SIZE=8388608"},
         });
         step.dependOn(&page.run.step);
     } else if (target.result.abi.isAndroid()) {
         addAndroidApp(b, parts, options.name, root, step);
     } else {
-        const exe = b.addExecutable(.{ .name = options.name, .root_module = root, .use_llvm = true });
+        const exe = b.addExecutable(.{ .name = options.name, .root_module = root });
         const install = b.addInstallArtifact(exe, .{});
         b.getInstallStep().dependOn(&install.step);
         // Run the installed copy, so Windows finds accesskit.dll beside it.
-        const run = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
+        const run = b.addRunFile(b.graph.path(.install_bin, exe.out_filename));
         run.step.dependOn(&install.step);
         if (wb.named_lazy_paths.get("accesskit_dll")) |dll| {
             const install_dll = b.addInstallBinFile(dll, "accesskit.dll");
             b.getInstallStep().dependOn(&install_dll.step);
             run.step.dependOn(&install_dll.step);
         }
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         step.dependOn(&run.step);
     }
 }
@@ -263,7 +264,7 @@ fn addAndroidApp(b: *std.Build, parts: Parts, name: []const u8, root: *std.Build
     const vitellus_build = wb.lazyImport(@This(), "vitellus") orelse return;
     const sdk = android.Sdk.create(b, .{});
     // SDLActivity loads `libmain.so` and calls its exported `SDL_main` (`weeoui_sdl3.exportMain`).
-    const lib = b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = root, .use_llvm = true });
+    const lib = b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = root });
     // zig-sdl3's SDL has no Android backend; Vitellus rebuilds it with its Android patch. That
     // swaps the library inside the sdl3 module, so it happens once and later apps share it.
     const first = android_sdl == null;
@@ -342,9 +343,20 @@ const android_manifest =
 /// prebuilt C library into Weeoui. Elsewhere (musl, or Linux on other architectures) Weeoui
 /// builds without it, as `accesskit.supported` says. On Windows it is a DLL; apps install
 /// `accesskit_dll` (a named lazy path) next to their executable.
-fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, target: std.Target) void {
+/// `header` as a Zig module, now that Zig 0.17 has no `@cImport`, with `include_dir` on its search path.
+fn translateC(b: *std.Build, target: std.Build.ResolvedTarget, header: std.Build.LazyPath, include_dir: ?std.Build.LazyPath) *std.Build.Module {
+    // ponytail: Zig ships no bionic headers, so Android translates against musl on the same CPU;
+    // fine for these headers' plain C types, revisit if one needs bionic-only declarations.
+    const translate_target = if (target.result.abi.isAndroid()) b.resolveTargetQuery(.{ .cpu_arch = target.result.cpu.arch, .os_tag = .linux, .abi = .musl }) else target;
+    const translated = b.addTranslateC(.{ .root_source_file = header, .target = translate_target, .optimize = .debug });
+    if (include_dir) |dir| translated.addIncludePath(dir);
+    return translated.createModule();
+}
+
+fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, resolved: std.Build.ResolvedTarget) void {
+    const target = resolved.result;
     const accesskit = b.dependency("accesskit_c", .{});
-    mod.addIncludePath(accesskit.path("include"));
+    mod.addImport("accesskit_c", translateC(b, resolved, accesskit.path("include/accesskit.h"), accesskit.path("include")));
     mod.link_libc = true;
     // No Android, web, musl or other-architecture build: `accesskit.supported` is false there.
     if (target.abi.isAndroid() or target.os.tag == .emscripten) return;

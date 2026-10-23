@@ -401,14 +401,14 @@ fn fileChosen(_: ?*anyopaque, files: ?[]const [*:0]const u8, _: ?usize, failed: 
         @memcpy(chosen.name[0..len], name[0..len]);
         chosen.len = len;
     };
-    sdl3.events.push(.{ .user = .{ .common = .{ .timestamp = 0 }, .event_type = @intFromEnum(sdl3.events.Type.user), .code = file_event_code, .data1 = chosen } }) catch std.heap.c_allocator.destroy(chosen);
+    sdl3.events.push(.{ .user = .{ .common = .{ .timestamp = 0 }, .event_type = @backingInt(sdl3.events.Type.user), .code = file_event_code, .data1 = chosen } }) catch std.heap.c_allocator.destroy(chosen);
 }
 
 /// The system clipboard: SDL's is the page's own in the browser.
 fn copyText(text: []const u8) void {
     if (web) return ui.web.copy(text);
     var buffer: [1024]u8 = undefined;
-    sdl3.clipboard.setText(std.fmt.bufPrintZ(&buffer, "{s}", .{text}) catch return) catch {};
+    sdl3.clipboard.setText(std.fmt.bufPrintSentinel(&buffer, "{s}", .{text}, 0) catch return) catch {};
 }
 
 /// The SDL callbacks' app state: a handle, since zig-sdl3 copies the state by value.

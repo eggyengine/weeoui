@@ -4,9 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Rect = @import("types.zig").Rect;
 const a11y = @import("accessibility.zig");
-const c = @cImport({
-    @cInclude("accesskit.h");
-});
+const c = @import("accesskit_c");
 
 const text_run_id: u64 = @as(u64, 1) << 63;
 

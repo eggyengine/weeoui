@@ -76,7 +76,7 @@ fn sectionHeader(object: []u8, headers_at: u64, header_len: u16, index: u64) !*[
 test "an object's debug sections are emptied, and nothing else" {
     // An ELF64 object with sections: null, .shstrtab, .text, .debug_info, .rela.debug_info.
     const names = "\x00.shstrtab\x00.text\x00.debug_info\x00.rela.debug_info\x00";
-    var object = [_]u8{0} ** (64 + names.len + 5 * 64);
+    var object: [64 + names.len + 5 * 64]u8 = @splat(0);
     @memcpy(object[0..6], "\x7fELF\x02\x01");
     const headers_at = 64 + names.len;
     std.mem.writeInt(u64, object[0x28..][0..8], headers_at, .little);

@@ -1,7 +1,7 @@
 .{
     .name = .weeoui,
     .version = "0.0.1",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .eggenvector = .{
             .url = "git+https://github.com/eggyengine/eggenvector#0090788fd2de5151577ae15000bd0f954f51e0ed",
@@ -12,8 +12,8 @@
             .hash = "freetype-2.14.3-C3-WdXSKAAB-kHs4qgRoeoFnRkNQn6M_SSlUGZ6ywgBQ",
         },
         .sdl3 = .{
-            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=v0.2.2#83c694024f23cbacfa36fcd8fca1c57d4957203e",
-            .hash = "sdl3-0.2.2-NmT1Q-2jKQBa4uSXUwuVwdmXpXe-eYwim7Wkyx531v6O",
+            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=master#666331118c8f7d8a03ea633d79a343c34dc32b84",
+            .hash = "sdl3-0.2.3-NmT1Q1QDKgACd5t_PNSG08lcOCX25qaRYZjUmXPTVBY_",
             .lazy = true,
         },
         .vitellus = .{
@@ -22,8 +22,8 @@
             .lazy = true,
         },
         .android = .{
-            .url = "git+https://github.com/silbinarywolf/zig-android-sdk?ref=main#0e8dfe60ec5120e99d6705ab4606079bc3160a53",
-            .hash = "android-0.3.0-7iz7Qp9IAgBlbdmEnCTne54Rn_lfHtiN3Er6HFkhn5y8",
+            .url = "git+https://github.com/silbinarywolf/zig-android-sdk?ref=main#24de0c1a610efd26092e64b141564b7cf7437a39",
+            .hash = "android-0.3.0-7iz7QktKAgCbNxGEZRqi65ePYTpV-tohGNC9oMHMLYfj",
             .lazy = true,
         },
         .accesskit_c = .{
