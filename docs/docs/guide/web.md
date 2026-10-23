@@ -8,7 +8,7 @@ title: Run in the browser
 Weeoui apps run in the browser on WebGPU, from the same code as on the desktop:
 
 ```bash
-zig build run -Dtarget=wasm32-emscripten -Doptimize=ReleaseFast
+zig build run -Dtarget=wasm32-emscripten -Doptimize=fast
 ```
 
 This builds `zig-out/web/<name>.html` (with `.js` and `.wasm` beside it), serves it and opens it in your browser. Any static file host can serve that folder. Leave out `-Doptimize` only to debug: Debug builds are much slower in the browser.
