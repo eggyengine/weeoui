@@ -3474,8 +3474,10 @@ test "title bar menus share the row with the buttons and collapse behind a hambu
     try std.testing.expect(demo.accessibilityAction(menubar_first_id + 1, .click));
     try demo.relayout(std.testing.allocator, .{ .x = 0, .y = 0, .w = 1200, .h = 800 }, &font);
     try std.testing.expect(demo.popupOpen());
+    // On the dock's tab strip, right of the open File menu (which covers the first tab).
     const tab = demo.controls[demo.indexOf(ui.dock.first_id + @backingInt(Panel.components)).?];
-    demo.pointerDown(tab.x + 4, tab.y + 4);
+    const menu = demo.overlay_rects[7];
+    demo.pointerDown(menu.x + menu.w + 20, tab.y + 4);
     demo.pointerUp();
     try std.testing.expectEqual(@as(u32, 0), demo.menubar_open);
     // Narrow: one hamburger; its rows open the menus, and File's Share opens inside that.
