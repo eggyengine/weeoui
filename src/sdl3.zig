@@ -381,7 +381,12 @@ fn handleScaledEvent(ctx: *ui.Context, event: sdl3.events.Event, scale: f32) voi
     if (windowOf(event)) |window| {
         if (ctx.accesskit == null and ui.accesskit.supported) {
             if (accessKitWindow(window)) |native| {
+                // AccessKit subclasses a Windows window only before it is first shown, so a shown one hides meanwhile.
+                // ponytail: blinks once; attach as the window is made, hidden, to drop this.
+                const shown = builtin.os.tag == .windows and !window.getFlags().hidden;
+                if (shown) window.hide() catch {};
                 ctx.attachAccessibility(native) catch |err| std.log.warn("screen reader support unavailable: {s}", .{@errorName(err)});
+                if (shown) window.show() catch {};
             } else |err| std.log.warn("screen reader support unavailable: {s}", .{@errorName(err)});
             if (ctx.accesskit) |adapter| syncWindowBounds(adapter, window);
         }

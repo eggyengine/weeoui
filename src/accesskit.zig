@@ -43,6 +43,17 @@ pub const Action = union(enum) {
     set_selection: struct { target: u32, anchor: usize, focus: usize },
 };
 
+/// `accesskit_windows_subclassing_adapter_new`, taking the `HWND` untyped: a handle is an id, not
+/// an aligned pointer (Wine's are often odd), so translate-c's `HWND` can't hold every one.
+extern fn accesskit_windows_subclassing_adapter_new(
+    hwnd: *anyopaque,
+    activation_handler: c.accesskit_activation_handler_callback,
+    activation_handler_userdata: ?*anyopaque,
+    action_handler: c.accesskit_action_handler_callback,
+    action_handler_userdata: ?*anyopaque,
+) ?*c.accesskit_windows_subclassing_adapter;
+const windows_subclassing_adapter_new = accesskit_windows_subclassing_adapter_new;
+
 const Native = switch (os) {
     .linux => c.accesskit_unix_adapter,
     .windows => c.accesskit_windows_subclassing_adapter,
@@ -70,7 +81,7 @@ pub const Adapter = struct {
         self.* = .{ .allocator = allocator, .name = name, .arena = .init(allocator) };
         self.native = switch (os) {
             .linux => c.accesskit_unix_adapter_new(initialTree, self, handleAction, self, deactivated, self),
-            .windows => c.accesskit_windows_subclassing_adapter_new(@ptrCast(@alignCast(window.win32)), initialTree, self, handleAction, self),
+            .windows => windows_subclassing_adapter_new(window.win32, initialTree, self, handleAction, self),
             .macos => blk: {
                 c.accesskit_macos_add_focus_forwarder_to_window_class(window.cocoa.class_name.ptr);
                 break :blk c.accesskit_macos_subclassing_adapter_for_window(window.cocoa.window, initialTree, self, handleAction, self);
