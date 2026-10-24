@@ -382,6 +382,44 @@ pub const Alert = struct {
     destructive: bool = false,
 };
 
+/// A GitHub-style alert's kind (`> [!NOTE]` and so on), each with its own colour.
+pub const Callout = enum {
+    note,
+    tip,
+    important,
+    warning,
+    caution,
+
+    /// GitHub's hue for the kind, readable on light and dark cards alike.
+    pub fn color(self: Callout) Color {
+        return switch (self) {
+            .note => types.rgb(0x2F, 0x81, 0xF7),
+            .tip => types.rgb(0x2D, 0xA4, 0x4E),
+            .important => types.rgb(0x89, 0x57, 0xE5),
+            .warning => types.rgb(0xD2, 0x99, 0x22),
+            .caution => types.rgb(0xF8, 0x51, 0x49),
+        };
+    }
+
+    pub fn title(self: Callout) []const u8 {
+        return switch (self) {
+            .note => "Note",
+            .tip => "Tip",
+            .important => "Important",
+            .warning => "Warning",
+            .caution => "Caution",
+        };
+    }
+};
+
+/// A card tinted with the callout's colour, a bar of it down the left edge.
+pub fn drawCallout(c: *Canvas, r: Rect, kind: Callout) !void {
+    const radius = c.theme.radiusMd();
+    try c.roundRect(r, c.theme.card, radius);
+    try c.roundRectAlpha(r, kind.color(), radius, 0.12);
+    try c.roundRect(.{ .x = r.x, .y = r.y, .w = 4, .h = r.h }, kind.color(), 2);
+}
+
 pub fn drawAlert(c: *Canvas, r: Rect, opts: Alert) !void {
     const radius = c.theme.radiusLg();
     try c.roundRect(r, if (opts.destructive) c.theme.destructive else c.theme.border, radius);

@@ -1172,25 +1172,23 @@ pub fn typeset(b: L.Builder, markdown: []const u8, options: TypesetOptions) !*L.
 /// A quote's block: a callout when it opens with a GitHub alert marker (`[!WARNING]`), else a
 /// blockquote.
 fn quote(b: L.Builder, text: []const u8) !*L.Element {
-    const markers = [_]struct { marker: []const u8, title: []const u8 }{
-        .{ .marker = "[!NOTE]", .title = "Note" },
-        .{ .marker = "[!TIP]", .title = "Tip" },
-        .{ .marker = "[!IMPORTANT]", .title = "Important" },
-        .{ .marker = "[!WARNING]", .title = "Warning" },
-        .{ .marker = "[!CAUTION]", .title = "Caution" },
-    };
-    for (markers) |kind| if (std.ascii.startsWithIgnoreCase(text, kind.marker)) {
-        return callout(b, kind.title, std.mem.trimStart(u8, text[kind.marker.len..], " "));
-    };
+    inline for (@typeInfo(primitives.Callout).@"enum".field_names) |name| {
+        const alert_marker = "[!" ++ name ++ "]";
+        if (std.ascii.startsWithIgnoreCase(text, alert_marker)) {
+            return callout(b, @field(primitives.Callout, name), std.mem.trimStart(u8, text[alert_marker.len..], " "));
+        }
+    }
     return blockquote(b, text);
 }
-/// A titled box around `text`, sized to it (unlike `alert`, whose height is fixed).
-pub fn callout(b: L.Builder, title: []const u8, text: []const u8) !*L.Element {
-    const title_node = try b.node(0, .{}, .{ .text = .{ .value = title, .size = 16 } }, &.{});
+/// A box in `kind`'s colour, titled after it, around `text`; sized to it (unlike `alert`, whose
+/// height is fixed).
+pub fn callout(b: L.Builder, kind: primitives.Callout, text: []const u8) !*L.Element {
+    const title_node = try b.node(0, .{}, .{ .text = .{ .value = kind.title(), .size = 16 } }, &.{});
+    // Muted, so it keeps the theme's colour rather than the callout's.
     const body = try b.node(0, .{}, .{ .text = .{ .value = text, .size = 15, .tone = .muted, .wrap = true } }, &.{});
     const children: []const *L.Element = if (text.len > 0) &.{ title_node, body } else &.{title_node};
-    const result = try b.node(0, .{ .gap = 6, .padding = .{ .left = 14, .right = 14, .top = 12, .bottom = 12 } }, .{ .surface = .card }, children);
-    result.accessibility = .{ .role = .group, .label = title };
+    const result = try b.node(0, .{ .gap = 6, .padding = .{ .left = 18, .right = 14, .top = 12, .bottom = 12 } }, .{ .callout = kind }, children);
+    result.accessibility = .{ .role = .group, .label = kind.title() };
     return result;
 }
 fn numberedItem(line: []const u8) ?[]const u8 {
@@ -1500,6 +1498,7 @@ test "typeset joins a quote's lines and shows GitHub alerts as callouts" {
     doc.layout(.{ .x = 0, .y = 0, .w = 400, .h = 800 }, &font);
     try std.testing.expectEqual(@as(usize, 2), doc.children.len);
     const warning = doc.children[0];
+    try std.testing.expectEqual(primitives.Callout.warning, warning.paint_kind.callout);
     try std.testing.expectEqualStrings("Warning", warning.children[0].paint_kind.text.value);
     try std.testing.expectEqualStrings("Early days: the menu does nothing yet.", warning.children[1].paint_kind.text.value);
     try std.testing.expectEqualStrings("two lines of one quote", doc.children[1].children[1].paint_kind.text.value);

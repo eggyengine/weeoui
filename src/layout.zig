@@ -77,6 +77,8 @@ pub const Paint = union(enum) {
     toggle_button: primitives.ToggleButton,
     surface: primitives.Surface,
     alert: primitives.Alert,
+    /// Its children's foreground text takes the callout's colour (muted text stays muted).
+    callout: primitives.Callout,
     bar_chart: []const f32,
     menu_item: primitives.MenuItem,
     disclosure: struct { label: []const u8, open: bool = false },
@@ -385,6 +387,10 @@ pub const Element = struct {
                 };
             },
             .alert => |value| try primitives.drawAlert(c, self.bounds, value),
+            .callout => |kind| {
+                try primitives.drawCallout(c, self.bounds, kind);
+                c.theme.foreground = kind.color();
+            },
             .bar_chart => |values| try primitives.drawBarChart(c, self.bounds, values),
             .menu_item => |item| {
                 var value = item;
