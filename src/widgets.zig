@@ -1085,7 +1085,8 @@ pub const TypesetOptions = struct {
 };
 
 /// Style rendered markdown in one container (shadcn/ui Typeset): `#`-`####` headings,
-/// paragraphs, `-`/`*`/`1.` lists, `>` quotes, fenced code, and `|` tables.
+/// paragraphs, `-`/`*`/`1.` lists, `>` quotes (GitHub's `> [!NOTE]`-style alerts as callouts),
+/// fenced code, and `|` tables.
 // ponytail: block-level only; inline **bold**, _italic_ and links render as plain text (backticks are dropped).
 pub fn typeset(b: L.Builder, markdown: []const u8, options: TypesetOptions) !*L.Element {
     const chat = options.density == .chat;
@@ -1093,6 +1094,7 @@ pub fn typeset(b: L.Builder, markdown: []const u8, options: TypesetOptions) !*L.
     var blocks: std.ArrayList(*L.Element) = .empty;
     defer blocks.deinit(b.allocator);
     var paragraph_text: std.ArrayList(u8) = .empty;
+    var quote_text: std.ArrayList(u8) = .empty;
     var list_items: std.ArrayList([]const u8) = .empty;
     var ordered = false;
     var table_rows: std.ArrayList([]const []const u8) = .empty;
@@ -1121,6 +1123,9 @@ pub fn typeset(b: L.Builder, markdown: []const u8, options: TypesetOptions) !*L.
         if (paragraph_text.items.len > 0 and (raw == null or trimmed.len == 0 or bullet or number != null or table_line or trimmed[0] == '#' or trimmed[0] == '>' or std.mem.startsWith(u8, trimmed, "```"))) {
             try blocks.append(b.allocator, try b.node(0, .{}, .{ .text = .{ .value = try paragraph_text.toOwnedSlice(b.allocator), .size = body, .wrap = true } }, &.{}));
         }
+        if (quote_text.items.len > 0 and (raw == null or trimmed.len == 0 or trimmed[0] != '>')) {
+            try blocks.append(b.allocator, try quote(b, try quote_text.toOwnedSlice(b.allocator)));
+        }
         if (list_items.items.len > 0 and ((!bullet and number == null) or (number != null) != ordered)) {
             try blocks.append(b.allocator, try markdownList(b, list_items.items, ordered, body));
             list_items.clearRetainingCapacity();
@@ -1138,7 +1143,10 @@ pub fn typeset(b: L.Builder, markdown: []const u8, options: TypesetOptions) !*L.
             const title = std.mem.trimStart(u8, trimmed[level..], " ");
             try blocks.append(b.allocator, try heading(b, @intCast(@min(4, level) + @as(usize, if (chat) 1 else 0)), try stripTicks(b, title)));
         } else if (trimmed[0] == '>') {
-            try blocks.append(b.allocator, try blockquote(b, try stripTicks(b, std.mem.trimStart(u8, trimmed[1..], " "))));
+            // Consecutive `>` lines are one quote, joined like a paragraph's.
+            const quoted = std.mem.trimStart(u8, trimmed[1..], " ");
+            if (quote_text.items.len > 0 and quoted.len > 0) try quote_text.append(b.allocator, ' ');
+            try quote_text.appendSlice(b.allocator, try stripTicks(b, quoted));
         } else if (bullet or number != null) {
             ordered = number != null;
             try list_items.append(b.allocator, try stripTicks(b, if (number) |rest| rest else trimmed[2..]));
@@ -1159,6 +1167,30 @@ pub fn typeset(b: L.Builder, markdown: []const u8, options: TypesetOptions) !*L.
     }
     const result = try b.node(0, .{ .gap = if (chat) 10 else 16 }, .none, blocks.items);
     result.accessibility = .{ .role = .group, .label = "Document" };
+    return result;
+}
+/// A quote's block: a callout when it opens with a GitHub alert marker (`[!WARNING]`), else a
+/// blockquote.
+fn quote(b: L.Builder, text: []const u8) !*L.Element {
+    const markers = [_]struct { marker: []const u8, title: []const u8 }{
+        .{ .marker = "[!NOTE]", .title = "Note" },
+        .{ .marker = "[!TIP]", .title = "Tip" },
+        .{ .marker = "[!IMPORTANT]", .title = "Important" },
+        .{ .marker = "[!WARNING]", .title = "Warning" },
+        .{ .marker = "[!CAUTION]", .title = "Caution" },
+    };
+    for (markers) |kind| if (std.ascii.startsWithIgnoreCase(text, kind.marker)) {
+        return callout(b, kind.title, std.mem.trimStart(u8, text[kind.marker.len..], " "));
+    };
+    return blockquote(b, text);
+}
+/// A titled box around `text`, sized to it (unlike `alert`, whose height is fixed).
+pub fn callout(b: L.Builder, title: []const u8, text: []const u8) !*L.Element {
+    const title_node = try b.node(0, .{}, .{ .text = .{ .value = title, .size = 16 } }, &.{});
+    const body = try b.node(0, .{}, .{ .text = .{ .value = text, .size = 15, .tone = .muted, .wrap = true } }, &.{});
+    const children: []const *L.Element = if (text.len > 0) &.{ title_node, body } else &.{title_node};
+    const result = try b.node(0, .{ .gap = 6, .padding = .{ .left = 14, .right = 14, .top = 12, .bottom = 12 } }, .{ .surface = .card }, children);
+    result.accessibility = .{ .role = .group, .label = title };
     return result;
 }
 fn numberedItem(line: []const u8) ?[]const u8 {
@@ -1449,4 +1481,26 @@ test "typeset turns markdown blocks into headings, lists, quotes, code and table
     try std.testing.expectEqualStrings("zig build", doc.children[5].children[0].paint_kind.text.value);
     try std.testing.expectEqual(L.Accessibility.Role.table, doc.children[6].accessibility.role.?);
     try std.testing.expectEqual(@as(usize, 2), doc.children[6].children.len); // header + one row, divider dropped
+}
+
+test "typeset joins a quote's lines and shows GitHub alerts as callouts" {
+    var font = try @import("font.zig").Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer font.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const b = L.Builder{ .allocator = arena.allocator() };
+    const doc = try typeset(b,
+        \\> [!WARNING]
+        \\> Early days: the menu
+        \\> does nothing yet.
+        \\
+        \\> two lines
+        \\> of one quote
+    , .{});
+    doc.layout(.{ .x = 0, .y = 0, .w = 400, .h = 800 }, &font);
+    try std.testing.expectEqual(@as(usize, 2), doc.children.len);
+    const warning = doc.children[0];
+    try std.testing.expectEqualStrings("Warning", warning.children[0].paint_kind.text.value);
+    try std.testing.expectEqualStrings("Early days: the menu does nothing yet.", warning.children[1].paint_kind.text.value);
+    try std.testing.expectEqualStrings("two lines of one quote", doc.children[1].children[1].paint_kind.text.value);
 }
