@@ -1,5 +1,6 @@
 //! FreeType rasterization into a grayscale atlas plus a color atlas for emoji.
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("freetype_c");
 const Rect = @import("types.zig").Rect;
 const log = std.log.scoped(.font);
@@ -39,7 +40,7 @@ const icon_masks = [_][]const u8{
     @embedFile("assets/lucide/paperclip.mask"),
 };
 /// Where desktop systems keep a color emoji font; the first readable one wins.
-const system_emoji_paths = [_][]const u8{
+const system_emoji_paths = [_][:0]const u8{
     "/usr/share/fonts/noto/NotoColorEmoji.ttf",
     "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
     "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
@@ -81,6 +82,25 @@ const Shelf = struct {
         return at;
     }
 };
+
+/// Atlases come straight from the OS, whose fresh pages read as zero and take no memory until
+/// a glyph is written to them, so mostly empty atlases stay small (the color one is 16 MB).
+/// They skip `Allocator.alloc` and `free`, which fill every byte in Debug builds.
+const atlas_allocator = std.heap.page_allocator;
+
+/// A zeroed atlas of `len` bytes; free it with `freeAtlas`.
+fn allocAtlas(len: usize) ![]u8 {
+    const pixels = (atlas_allocator.rawAlloc(len, .@"1", @returnAddress()) orelse return error.OutOfMemory)[0..len];
+    // Wasm's page allocator hands back freed pages as they were, so clear those.
+    if (builtin.cpu.arch.isWasm()) @memset(pixels, 0);
+    // With transparent huge pages, one glyph would make 2 MB of the atlas resident; keep it to 4 KB.
+    if (builtin.os.tag == .linux) std.posix.madvise(@alignCast(pixels.ptr), pixels.len, std.posix.MADV.NOHUGEPAGE) catch {};
+    return pixels;
+}
+
+fn freeAtlas(pixels: []u8) void {
+    atlas_allocator.rawFree(pixels, .@"1", @returnAddress());
+}
 
 /// FreeType state and glyphs rasterized after init. Heap-held so `*const Font` lookups can fill it.
 const Dynamic = struct {
@@ -209,13 +229,11 @@ pub const Font = struct {
         errdefer _ = c.FT_Done_FreeType(dynamic.library);
         if (c.FT_New_Memory_Face(dynamic.library, bytes.ptr, @intCast(bytes.len), 0, &dynamic.face) != 0) return error.InvalidFont;
         const face = dynamic.face;
-        const pixels = try allocator.alloc(u8, atlas_width * atlas_height);
-        errdefer allocator.free(pixels);
-        @memset(pixels, 0);
+        const pixels = try allocAtlas(atlas_width * atlas_height);
+        errdefer freeAtlas(pixels);
         pixels[0] = 255; // White texel for untextured shapes.
-        const color_pixels = try allocator.alloc(u8, color_atlas_size * color_atlas_size * 4);
-        errdefer allocator.free(color_pixels);
-        @memset(color_pixels, 0);
+        const color_pixels = try allocAtlas(color_atlas_size * color_atlas_size * 4);
+        errdefer freeAtlas(color_pixels);
         var font = Font{ .allocator = allocator, .pixels = pixels, .color_pixels = color_pixels, .dynamic = dynamic };
         const shelf = &dynamic.shelf;
         for (strike_sizes, 0..) |strike_size, strike_index| {
@@ -303,14 +321,19 @@ pub const Font = struct {
         dynamic.glyphs.deinit(self.allocator);
         self.allocator.destroy(dynamic);
         if (!self.owns_atlas) return;
-        self.allocator.free(self.color_pixels);
-        self.allocator.free(self.pixels);
+        freeAtlas(self.color_pixels);
+        freeAtlas(self.pixels);
     }
 
     /// Use a color emoji font for characters the main font lacks. Takes ownership of `bytes`.
     pub fn setEmojiFont(self: *Font, bytes: []u8) !void {
         var face: c.FT_Face = undefined;
         if (c.FT_New_Memory_Face(self.dynamic.library, bytes.ptr, @intCast(bytes.len), 0, &face) != 0) return error.InvalidFont;
+        self.replaceEmojiFace(face, bytes);
+    }
+
+    /// Swap in `face` as the emoji font, freeing the old face and the bytes it was read from.
+    fn replaceEmojiFace(self: *Font, face: c.FT_Face, bytes: ?[]u8) void {
         if (self.dynamic.emoji_face) |old| _ = c.FT_Done_Face(old);
         if (self.dynamic.emoji_bytes) |old| self.allocator.free(old);
         self.dynamic.emoji_face = face;
@@ -328,14 +351,14 @@ pub const Font = struct {
     }
 
     /// Load the platform's color emoji font, if one is installed. Returns whether it found one.
+    /// FreeType maps the file rather than reading it, so only the glyphs drawn take memory
+    /// (Noto Color Emoji is about 16 MB). `io` is unused and kept for callers.
     pub fn loadSystemEmoji(self: *Font, io: std.Io) bool {
+        _ = io;
         for (system_emoji_paths) |path| {
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(64 << 20)) catch continue;
-            self.setEmojiFont(bytes) catch |err| {
-                log.warn("skipping emoji font {s}: {s}", .{ path, @errorName(err) });
-                self.allocator.free(bytes);
-                continue;
-            };
+            var face: c.FT_Face = undefined;
+            if (c.FT_New_Face(self.dynamic.library, path.ptr, 0, &face) != 0) continue;
+            self.replaceEmojiFace(face, null);
             log.info("color emoji from {s}", .{path});
             return true;
         }
@@ -346,6 +369,20 @@ pub const Font = struct {
     /// Current atlas contents version; see `pixels` and `color_pixels`.
     pub fn version(self: *const Font) u32 {
         return self.dynamic.atlas.version;
+    }
+
+    /// The first row of each atlas (`pixels`, then `color_pixels`) that can still gain pixels.
+    /// Glyphs pack downward and are never removed, so rows above it are final: a renderer that
+    /// has sent them once re-sends only from here (to `usedRows`) when `version` changes.
+    pub fn openRows(self: *const Font) [2]usize {
+        const atlas = self.dynamic.atlas;
+        return .{ @min(atlas.shelf.y, atlas_height), @min(atlas.color_shelf.y, color_atlas_size) };
+    }
+
+    /// How many rows from the top of each atlas (`pixels`, then `color_pixels`) hold pixels.
+    pub fn usedRows(self: *const Font) [2]usize {
+        const atlas = self.dynamic.atlas;
+        return .{ @min(atlas.shelf.y + atlas.shelf.row_h, atlas_height), @min(atlas.color_shelf.y + atlas.color_shelf.row_h, color_atlas_size) };
     }
 
     fn packGray(self: *const Font, slot: c.FT_GlyphSlot) !Glyph {

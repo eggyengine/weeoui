@@ -27,8 +27,12 @@ pub const Renderer = struct {
     font_layout: vit.BindGroupLayout,
     font_group: vit.BindGroup,
     /// Created on the first atlas change: glyphs rasterized after `init` (Unicode, emoji).
+    /// Each grows to fit the rows an upload sends.
     staging: [frames_in_flight]?vit.Buffer = @splat(null),
+    staging_size: [frames_in_flight]usize = @splat(0),
     font_version: u32,
+    /// The first row of each atlas that may differ from the GPU copy (`Font.openRows`).
+    stale_rows: [2]usize,
     font_needs_barrier: bool = true,
 
     /// `color_format` is the render target format. The atlases start from `font`; `upload`
@@ -84,7 +88,7 @@ pub const Renderer = struct {
             .raster = .{ .cull_mode = .none },
             .layout = pipeline_layout,
         });
-        return .{ .device = device, .vertices = vertices, .capacity = @splat(capacity), .pipeline_layout = pipeline_layout, .pipeline = pipeline, .font_texture = font_texture, .font_view = font_view, .color_texture = color_texture, .color_view = color_view, .font_sampler = font_sampler, .font_layout = font_layout, .font_group = font_group, .font_version = font.version() };
+        return .{ .device = device, .vertices = vertices, .capacity = @splat(capacity), .pipeline_layout = pipeline_layout, .pipeline = pipeline, .font_texture = font_texture, .font_view = font_view, .color_texture = color_texture, .color_view = color_view, .font_sampler = font_sampler, .font_layout = font_layout, .font_group = font_group, .font_version = font.version(), .stale_rows = font.openRows() };
     }
 
     pub fn deinit(self: *Renderer) void {
@@ -130,29 +134,49 @@ pub const Renderer = struct {
         buffer.unmap(.{ .size = size });
     }
 
-    // ponytail: re-sends both whole atlases (8 MB) when any glyph is added; track dirty rows if typing new scripts stutters.
+    /// Send the atlas rows that changed since the last upload: from `stale_rows` down to the
+    /// last row holding pixels, in each atlas.
     fn uploadAtlases(self: *Renderer, cmd: vit.CommandBuffer, font: *const ui.Font) !void {
-        const gray = font.pixels.len;
-        const total = gray + font.color_pixels.len;
-        if (self.staging[self.slot] == null) self.staging[self.slot] = try vit.Buffer.init(self.device, .{ .label = "weeoui glyph staging", .size = total, .usage = .{ .transfer_src = true }, .memory = .upload });
+        const used = font.usedRows();
+        const gray_first = self.stale_rows[0];
+        const color_first = self.stale_rows[1];
+        const gray_rows = used[0] -| gray_first;
+        const color_rows = used[1] -| color_first;
+        const gray_row_bytes = ui.atlas_width;
+        const color_row_bytes = ui.color_atlas_size * 4;
+        const gray = gray_rows * gray_row_bytes;
+        const total = gray + color_rows * color_row_bytes;
+        if (total == 0) {
+            self.font_version = font.version();
+            return;
+        }
+
+        // Copy the rows into this slot's staging buffer, replacing it when too small.
+        if (total > self.staging_size[self.slot]) {
+            const buffer = try vit.Buffer.init(self.device, .{ .label = "weeoui glyph staging", .size = total, .usage = .{ .transfer_src = true }, .memory = .upload });
+            if (self.staging[self.slot]) |old| old.deinit();
+            self.staging[self.slot] = buffer;
+            self.staging_size[self.slot] = total;
+        }
         const staging = self.staging[self.slot].?;
         const mapped = try staging.map(.write, .{ .size = total });
-        @memcpy(mapped[0..gray], font.pixels);
-        @memcpy(mapped[gray..total], font.color_pixels);
+        @memcpy(mapped[0..gray], font.pixels[gray_first * gray_row_bytes ..][0..gray]);
+        @memcpy(mapped[gray..total], font.color_pixels[color_first * color_row_bytes ..][0 .. total - gray]);
         staging.unmap(.{ .size = total });
         try cmd.barrier(&.{
             .{ .buffer = .{ .buffer = staging, .before = .host_write, .after = .copy_source } },
             .{ .texture = .{ .texture = self.font_texture, .before = .sampled, .after = .copy_destination } },
             .{ .texture = .{ .texture = self.color_texture, .before = .sampled, .after = .copy_destination } },
         });
-        try cmd.copyBufferToTexture(.{ .buffer = staging, .bytes_per_row = ui.atlas_width, .texture = .{ .texture = self.font_texture }, .extent = .{ .width = ui.atlas_width, .height = ui.atlas_height } });
-        try cmd.copyBufferToTexture(.{ .buffer = staging, .buffer_offset = gray, .bytes_per_row = ui.color_atlas_size * 4, .texture = .{ .texture = self.color_texture }, .extent = .{ .width = ui.color_atlas_size, .height = ui.color_atlas_size } });
+        if (gray_rows > 0) try cmd.copyBufferToTexture(.{ .buffer = staging, .bytes_per_row = gray_row_bytes, .texture = .{ .texture = self.font_texture, .origin = .{ .y = @intCast(gray_first) } }, .extent = .{ .width = ui.atlas_width, .height = @intCast(gray_rows) } });
+        if (color_rows > 0) try cmd.copyBufferToTexture(.{ .buffer = staging, .buffer_offset = gray, .bytes_per_row = color_row_bytes, .texture = .{ .texture = self.color_texture, .origin = .{ .y = @intCast(color_first) } }, .extent = .{ .width = ui.color_atlas_size, .height = @intCast(color_rows) } });
         try cmd.barrier(&.{
             .{ .buffer = .{ .buffer = staging, .before = .copy_source, .after = .host_write } },
             .{ .texture = .{ .texture = self.font_texture, .before = .copy_destination, .after = .sampled } },
             .{ .texture = .{ .texture = self.color_texture, .before = .copy_destination, .after = .sampled } },
         });
         self.font_version = font.version();
+        self.stale_rows = font.openRows();
     }
 
     /// Draw `count` uploaded vertices starting at `first`. Call inside a render pass targeting `extent`.
