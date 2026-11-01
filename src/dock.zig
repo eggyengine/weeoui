@@ -599,10 +599,26 @@ pub const DockSpace = struct {
     /// Middle click: close the panel whose tab is `id`, like a browser tab. Returns whether `id`
     /// was a tab.
     pub fn closeTab(self: *DockSpace, id: u32) bool {
-        if (id <= tab_first or id >= tab_first + max_panel) return false;
-        self.remove(id - tab_first);
+        self.remove(tabPanel(id) orelse return false);
         return true;
     }
+    /// The panel whose tab is `id`, which a middle click there closes (`closeTab`); null when
+    /// `id` is no tab. Lets a host ask before the panel goes.
+    pub fn tabPanel(id: u32) ?u32 {
+        if (id <= tab_first or id >= tab_first + max_panel) return null;
+        return id - tab_first;
+    }
+
+    /// The panel a `press` on `id` closes, when `id` is a stack menu's Close; null otherwise.
+    /// Lets a host ask before the panel goes.
+    pub fn menuCloses(self: *const DockSpace, id: u32) ?u32 {
+        if (id < menu_item_first or id >= menu_item_first + max_nodes * 4) return null;
+        if (@as(MenuAction, @fromBackingInt(@intCast((id - menu_item_first) % 4))) != .close) return null;
+        const node = self.nodes[(id - menu_item_first) / 4];
+        if (node.kind != .tabs or node.count == 0) return null;
+        return node.panels[node.active];
+    }
+
     /// Close the open stack menu (a press elsewhere, or Escape). Returns whether one was open.
     pub fn dismissMenu(self: *DockSpace) bool {
         defer self.menu = none;
@@ -1217,6 +1233,21 @@ test "middle-clicking a tab closes its panel" {
     try std.testing.expect(dock.closeTab(tab_first + 2));
     try std.testing.expect(dock.nodeOf(2) == null and dock.nodeOf(1) != null);
     try std.testing.expect(!dock.closeTab(menu_first));
+}
+
+test "a host can tell which panel a middle click or a stack menu's Close would close" {
+    var dock = DockSpace.init();
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .center);
+    try std.testing.expectEqual(@as(?u32, 2), DockSpace.tabPanel(tab_first + 2));
+    try std.testing.expectEqual(@as(?u32, null), DockSpace.tabPanel(menu_first));
+    // The menu closes the stack's shown panel, and its other items close nothing.
+    const stack = dock.nodeOf(2).?;
+    dock.select(stack, 2);
+    try std.testing.expectEqual(@as(?u32, 2), dock.menuCloses(menuItemId(stack, .close)));
+    try std.testing.expectEqual(@as(?u32, null), dock.menuCloses(menuItemId(stack, .float)));
+    try std.testing.expect(dock.press(menuItemId(stack, .close), 0, 0));
+    try std.testing.expect(dock.nodeOf(2) == null);
 }
 
 test "the stack menu closes a panel, and add brings it back" {
