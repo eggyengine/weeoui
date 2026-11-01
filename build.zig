@@ -6,6 +6,8 @@ pub fn build(b: *std.Build) void {
     // Browser builds (WebGPU) link with Emscripten, whose headers C dependencies are handed.
     const web = target.result.os.tag == .emscripten;
     const emscripten = if (web) (b.lazyImport(@This(), "vitellus") orelse return).Emscripten.init(b, b.option([]const u8, "emsdk", "Path to emsdk for web builds (default: $EMSDK, then ~/emsdk)")) else null;
+    // Zig ships no Emscripten libc headers, so C headers translate against emsdk's.
+    const libc_include: ?std.Build.LazyPath = if (emscripten) |em| em.include else null;
     const mod = b.addModule("weeoui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -17,7 +19,7 @@ pub fn build(b: *std.Build) void {
     const eggenvector = b.dependency("eggenvector", .{ .target = target, .optimize = optimize });
     mod.addImport("eggenvector", eggenvector.module("eggenvector"));
     const freetype_headers = freetype.artifact("freetype").getEmittedIncludeTree();
-    mod.addImport("freetype_c", translateC(b, target, freetype_headers.path(b, "freetype-zig.h"), freetype_headers));
+    mod.addImport("freetype_c", translateC(b, target, freetype_headers.path(b, "freetype-zig.h"), freetype_headers, libc_include));
     mod.linkLibrary(freetype.artifact("freetype"));
     // stb_image decodes PNG/JPEG/GIF/...; stb_image_resize2 fits them into the color atlas.
     const stb = b.dependency("stb", .{});
@@ -25,7 +27,7 @@ pub fn build(b: *std.Build) void {
         \\#define STBI_NO_STDIO
         \\#include "stb_image.h"
         \\#include "stb_image_resize2.h"
-    ), stb.path("")));
+    ), stb.path(""), libc_include));
     mod.addIncludePath(stb.path(""));
     mod.addCSourceFile(.{
         .file = b.addWriteFiles().add("stb.c",
@@ -39,7 +41,7 @@ pub fn build(b: *std.Build) void {
         .flags = &.{"-fno-sanitize=undefined"},
     });
     if (target.result.abi.isAndroid()) makePic(freetype.artifact("freetype"));
-    linkAccessKit(b, mod, target);
+    linkAccessKit(b, mod, target, libc_include);
     // Web apps that use `ui.web` link this with `emcc --js-library`.
     b.addNamedLazyPath("web_js", b.path("src/web.js"));
     const tests = b.addRunArtifact(b.addTest(.{ .root_module = mod }));
@@ -69,7 +71,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{ .{ .name = "weeoui", .module = mod }, .{ .name = "sdl3", .module = sdl3.module("sdl3") } },
                 .link_libc = true,
             });
-            if (target.result.abi.isAndroid()) adapter.?.addImport("jni", translateC(b, target, b.path("src/jni.h"), null));
+            if (target.result.abi.isAndroid()) adapter.?.addImport("jni", translateC(b, target, b.path("src/jni.h"), null, null));
             test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = adapter.? })).step);
         }
     }
@@ -343,20 +345,22 @@ const android_manifest =
 /// prebuilt C library into Weeoui. Elsewhere (musl, or Linux on other architectures) Weeoui
 /// builds without it, as `accesskit.supported` says. On Windows it is a DLL; apps install
 /// `accesskit_dll` (a named lazy path) next to their executable.
-/// `header` as a Zig module, now that Zig 0.17 has no `@cImport`, with `include_dir` on its search path.
-fn translateC(b: *std.Build, target: std.Build.ResolvedTarget, header: std.Build.LazyPath, include_dir: ?std.Build.LazyPath) *std.Build.Module {
+/// `header` as a Zig module, now that Zig 0.17 has no `@cImport`, with `include_dir` on its search
+/// path and `libc_include` standing in for the libc headers Zig lacks for the target (Emscripten).
+fn translateC(b: *std.Build, target: std.Build.ResolvedTarget, header: std.Build.LazyPath, include_dir: ?std.Build.LazyPath, libc_include: ?std.Build.LazyPath) *std.Build.Module {
     // ponytail: Zig ships no bionic headers, so Android translates against musl on the same CPU;
     // fine for these headers' plain C types, revisit if one needs bionic-only declarations.
     const translate_target = if (target.result.abi.isAndroid()) b.resolveTargetQuery(.{ .cpu_arch = target.result.cpu.arch, .os_tag = .linux, .abi = .musl }) else target;
     const translated = b.addTranslateC(.{ .root_source_file = header, .target = translate_target, .optimize = .debug });
     if (include_dir) |dir| translated.addIncludePath(dir);
+    if (libc_include) |dir| translated.addSystemIncludePath(dir);
     return translated.createModule();
 }
 
-fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, resolved: std.Build.ResolvedTarget) void {
+fn linkAccessKit(b: *std.Build, mod: *std.Build.Module, resolved: std.Build.ResolvedTarget, libc_include: ?std.Build.LazyPath) void {
     const target = resolved.result;
     const accesskit = b.dependency("accesskit_c", .{});
-    mod.addImport("accesskit_c", translateC(b, resolved, accesskit.path("include/accesskit.h"), accesskit.path("include")));
+    mod.addImport("accesskit_c", translateC(b, resolved, accesskit.path("include/accesskit.h"), accesskit.path("include"), libc_include));
     mod.link_libc = true;
     // No Android, web, musl or other-architecture build: `accesskit.supported` is false there.
     if (target.abi.isAndroid() or target.os.tag == .emscripten) return;
