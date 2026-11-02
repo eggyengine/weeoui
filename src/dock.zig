@@ -117,9 +117,9 @@ const Drag = union(enum) {
     tab: struct { panel: u32, x: f32, y: f32, started: bool = false, target: ?Target = null, pointer: [2]f32 = .{ 0, 0 } },
 };
 
-/// Where a panel sat in the main window before it floated or popped out, so `redock` can put it
-/// back: beside the stack or column holding `neighbours` (with `side` and `ratio` of the split),
-/// or into their stack for `.center`.
+/// Where a panel sat in the main window before it floated, popped out or was closed, so `redock`
+/// and `restore` can put it back: beside the stack or column holding `neighbours` (with `side`
+/// and `ratio` of the split), or into their stack for `.center`.
 const Home = struct {
     panel: u32 = 0,
     side: Side = .center,
@@ -275,7 +275,30 @@ pub const DockSpace = struct {
         self.nodes[index] = .{};
     }
 
-    /// Take `panel` out of the layout (it is no longer shown).
+    /// Close `panel`, remembering where it sat so `restore` reopens it there.
+    pub fn close(self: *DockSpace, panel: u32) void {
+        self.rememberHome(panel);
+        self.remove(panel);
+    }
+
+    /// Reopen `panel` where it was last closed, floated or popped out from; one with no place
+    /// remembered (or whose neighbours are all gone) docks as `add(panel, near, side)` would.
+    pub fn restore(self: *DockSpace, panel: u32, near: ?u32, side: Side) !void {
+        if (panel == 0 or panel >= max_panel) return error.InvalidPanel;
+        if (self.nodeOf(panel) != null) return error.PanelExists;
+        if (self.homeTarget(panel)) |at| {
+            const home = self.homeOf(panel).?;
+            if (self.insert(at, home.side, panel)) |_| {
+                if (home.side != .center) self.nodes[at].ratio = home.ratio;
+                return;
+            } else |_| {}
+        }
+        const fallback = if (near) |other| if (self.nodeOf(other) != null) other else null else null;
+        return self.add(panel, fallback, if (fallback != null) side else .center);
+    }
+
+    /// Take `panel` out of the layout (it is no longer shown), forgetting where it was; `close`
+    /// remembers.
     pub fn remove(self: *DockSpace, panel: u32) void {
         const index = self.nodeOf(panel) orelse return;
         self.removeTab(index, panel);
@@ -400,20 +423,25 @@ pub const DockSpace = struct {
     /// Put `panel` (already removed) back where `rememberHome` saw it, or into the largest stack
     /// when its neighbours have all left the main window.
     fn dockHome(self: *DockSpace, panel: u32) void {
-        const home = for (self.homes) |entry| {
-            if (entry.panel == panel) break entry;
-        } else return self.add(panel, null, .center) catch {};
-        // The smallest part of the main window holding every neighbour still there.
+        self.restore(panel, null, .center) catch {};
+    }
+
+    fn homeOf(self: *const DockSpace, panel: u32) ?Home {
+        for (self.homes) |entry| if (entry.panel == panel) return entry;
+        return null;
+    }
+
+    /// The smallest part of the main window holding every neighbour of `panel`'s home still
+    /// there; null without a home or neighbours.
+    fn homeTarget(self: *const DockSpace, panel: u32) ?Index {
+        const home = self.homeOf(panel) orelse return null;
         var target: ?Index = null;
         for (home.neighbours[0..home.count]) |neighbour| {
             const index = self.nodeOf(neighbour) orelse continue;
             if (self.hostOf(index) != .main) continue;
             target = if (target) |t| self.commonAncestor(t, index) else index;
         }
-        const at = target orelse return self.add(panel, null, .center) catch {};
-        if (self.insert(at, home.side, panel)) |_| {
-            if (home.side != .center) self.nodes[at].ratio = home.ratio;
-        } else |_| self.add(panel, null, .center) catch {};
+        return target;
     }
 
     fn commonAncestor(self: *const DockSpace, a: Index, b: Index) Index {
@@ -576,7 +604,7 @@ pub const DockSpace = struct {
                     .pop_out => self.detach(panel) catch {},
                     .float => self.float(panel, self.floatRect(panel, node.rect.x + 40, node.rect.y + 40)) catch {},
                     .dock_back => self.redock(self.hostOf(index)),
-                    .close => self.remove(panel),
+                    .close => self.close(panel),
                 }
             },
             window_button_first...window_button_first + max_floating * 3 - 1 => {
@@ -599,7 +627,7 @@ pub const DockSpace = struct {
     /// Middle click: close the panel whose tab is `id`, like a browser tab. Returns whether `id`
     /// was a tab.
     pub fn closeTab(self: *DockSpace, id: u32) bool {
-        self.remove(tabPanel(id) orelse return false);
+        self.close(tabPanel(id) orelse return false);
         return true;
     }
     /// The panel whose tab is `id`, which a middle click there closes (`closeTab`); null when
@@ -1260,6 +1288,28 @@ test "the stack menu closes a panel, and add brings it back" {
     try std.testing.expect(dock.nodeOf(2) == null and dock.menu == none);
     try dock.add(2, null, .center);
     try std.testing.expect(dock.nodeOf(2) != null);
+}
+
+test "a closed panel reopens where it was, and one never placed beside the panel asked for" {
+    var dock = DockSpace.init();
+    dock.layout(.{ .x = 0, .y = 0, .w = 1000, .h = 600 });
+    // A big stack (1), with 2 beside it on the right and 3 tabbed with 2.
+    try dock.add(1, null, .center);
+    try dock.add(2, 1, .right);
+    try dock.add(3, 2, .center);
+    dock.close(3);
+    try dock.restore(3, null, .center);
+    try std.testing.expectEqual(dock.nodeOf(2), dock.nodeOf(3));
+
+    // Alone in its column, it comes back as that column, not into the big stack.
+    dock.close(3);
+    dock.close(2);
+    try dock.restore(2, null, .center);
+    try std.testing.expect(dock.nodeOf(2).? != dock.nodeOf(1).?);
+
+    // Never placed: beside `near`.
+    try dock.restore(4, 2, .center);
+    try std.testing.expectEqual(dock.nodeOf(2), dock.nodeOf(4));
 }
 
 test "closing a popped-out or floating panel puts it back where it was" {
