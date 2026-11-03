@@ -219,9 +219,28 @@ pub const Font = struct {
     /// Whether `pixels` and `color_pixels` are this font's, not a companion's borrowed atlas.
     owns_atlas: bool = true,
 
+    /// What `initBaking` rasterizes before it returns.
+    pub const Bake = enum {
+        /// Printable ASCII at every size, so drawing never stops to rasterize it.
+        ascii,
+        /// Nothing: each character rasterizes the first time it is drawn, so the font is ready
+        /// at once, for text that must show before baking would finish.
+        on_draw,
+    };
+
     /// Rasterize printable ASCII from TTF/OTF `bytes`; other characters load on first use,
     /// so `bytes` must outlive the font (embedded fonts always do).
     pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Font {
+        return initBaking(allocator, bytes, .ascii);
+    }
+
+    /// `init`, rasterizing up front only what `bake` says.
+    ///
+    /// ```zig
+    /// var font = try Font.initBaking(gpa, ttf_bytes, .on_draw);
+    /// defer font.deinit();
+    /// ```
+    pub fn initBaking(allocator: std.mem.Allocator, bytes: []const u8, bake: Bake) !Font {
         if (bytes.len == 0) return error.InvalidFont;
         const dynamic = try allocator.create(Dynamic);
         errdefer allocator.destroy(dynamic);
@@ -242,6 +261,10 @@ pub const Font = struct {
             if (c.FT_Set_Pixel_Sizes(face, 0, strike_size) != 0) return error.InvalidFontSize;
             font.strikes[strike_index].size = @floatFromInt(strike_size);
             font.strikes[strike_index].ascent = @floatFromInt(face.*.size.*.metrics.ascender >> 6);
+            if (bake == .on_draw) {
+                font.strikes[strike_index].baked = false;
+                continue;
+            }
             for (32..127) |codepoint| {
                 if (c.FT_Load_Char(face, @intCast(codepoint), c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_LIGHT) != 0) return error.GlyphLoadFailed;
                 font.strikes[strike_index].glyphs[codepoint - 32] = try font.packGray(face.*.glyph);
@@ -268,7 +291,7 @@ pub const Font = struct {
             pixels[(at[1] + row) * atlas_width + at[0] + column] = @intFromFloat(@round(std.math.clamp(0.5 + (1 - d) * 0.5, 0, 1) * 255));
         };
         font.corner = .{ .x = @intCast(at[0] + 1), .y = @intCast(at[1] + 1), .w = corner_size, .h = corner_size };
-        log.debug("rasterized {d} strikes ({d}-{d}px); atlas {d}% full", .{ strike_sizes.len, strike_sizes[0], strike_sizes[strike_sizes.len - 1], (shelf.y + shelf.row_h) * 100 / atlas_height });
+        if (bake == .ascii) log.debug("rasterized {d} strikes ({d}-{d}px); atlas {d}% full", .{ strike_sizes.len, strike_sizes[0], strike_sizes[strike_sizes.len - 1], (shelf.y + shelf.row_h) * 100 / atlas_height });
         return font;
     }
 
@@ -761,4 +784,16 @@ test "a companion font loads into a nearly full atlas, taking room only for what
     try std.testing.expect(title.measure("Keep", 16) > title.measure("K", 16));
     var i: usize = 0;
     try std.testing.expect(title.next(title.strike(16), "K", &i).w > 0);
+}
+
+test "a font baked on draw starts with an empty atlas and measures as a baked one does" {
+    var baked = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer baked.deinit();
+    var lazy = try Font.initBaking(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), .on_draw);
+    defer lazy.deinit();
+    // Only the icons and the corner tile are in its atlas until something is drawn.
+    try std.testing.expect(lazy.usedRows()[0] < baked.usedRows()[0] / 4);
+    try std.testing.expectEqual(baked.measure("Loading the game", 13), lazy.measure("Loading the game", 13));
+    var i: usize = 0;
+    try std.testing.expect(lazy.next(lazy.strike(20), "E", &i).w > 0);
 }
