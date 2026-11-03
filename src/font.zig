@@ -198,6 +198,8 @@ pub const Font = struct {
         size: f32 = 0,
         ascent: f32 = 0,
         glyphs: [95]Glyph = @splat(.{}),
+        /// Whether `glyphs` holds ASCII; a companion's strikes rasterize it as it is drawn.
+        baked: bool = true,
         pub fn glyph(self: *const Strike, byte: u8) Glyph {
             return self.glyphs[if (byte >= 32 and byte <= 126) byte - 32 else '?' - 32];
         }
@@ -298,16 +300,14 @@ pub const Font = struct {
             .strike_count = sizes.len,
             .owns_atlas = false,
         };
+        // Glyphs rasterize as they are drawn: baking ASCII at every size would fill the shared
+        // atlas, which the owner's strikes mostly take already.
         for (sizes, 0..) |strike_size, strike_index| {
             if (c.FT_Set_Pixel_Sizes(dynamic.face, 0, strike_size) != 0) return error.InvalidFontSize;
             font.strikes[strike_index].size = @floatFromInt(strike_size);
             font.strikes[strike_index].ascent = @floatFromInt(dynamic.face.*.size.*.metrics.ascender >> 6);
-            for (32..127) |codepoint| {
-                if (c.FT_Load_Char(dynamic.face, @intCast(codepoint), c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_LIGHT) != 0) return error.GlyphLoadFailed;
-                font.strikes[strike_index].glyphs[codepoint - 32] = try font.packGray(dynamic.face.*.glyph);
-            }
+            font.strikes[strike_index].baked = false;
         }
-        dynamic.atlas.version +%= 1;
         return font;
     }
 
@@ -518,13 +518,24 @@ pub const Font = struct {
         const byte = value[i.*];
         if (byte < 0x80) {
             i.* += 1;
-            return selected.glyph(byte);
+            if (selected.baked) return selected.glyph(byte);
+            return self.cached(selected, if (byte >= 32 and byte <= 126) byte else '?');
         }
         const len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
         const codepoint = if (len > 1 and i.* + len <= value.len) std.unicode.utf8Decode(value[i.*..][0..len]) catch null else null;
         i.* += if (codepoint == null) 1 else len;
-        const cp = codepoint orelse return selected.glyph('?');
+        const cp = codepoint orelse return self.missing(selected);
         if (cp == 0x200d or (cp >= 0xfe00 and cp <= 0xfe0f)) return .{};
+        return self.cached(selected, cp);
+    }
+
+    /// What a character that can't be drawn draws as: `?`.
+    fn missing(self: *const Font, selected: *const Strike) Glyph {
+        return if (selected.baked) selected.glyph('?') else self.cached(selected, '?');
+    }
+
+    /// `cp` at `selected`'s size, rasterized into the atlas the first time.
+    fn cached(self: *const Font, selected: *const Strike, cp: u21) Glyph {
         const strike_index = (@intFromPtr(selected) - @intFromPtr(&self.strikes[0])) / @sizeOf(Strike);
         const key = (@as(u64, strike_index) << 32) | cp;
         const d = self.dynamic;
@@ -535,10 +546,11 @@ pub const Font = struct {
                 d.atlas.full_reported = true;
                 log.warn("glyph atlas is full; new characters draw as '?'", .{});
             }
-            break :blk selected.glyph('?');
+            // A missing '?' itself draws as nothing, so this can't recurse.
+            break :blk if (cp == '?') Glyph{} else self.missing(selected);
         };
         d.glyphs.put(self.allocator, key, g) catch return g;
-        if (g.w > 0 and !std.meta.eql(g, selected.glyph('?'))) d.atlas.version +%= 1;
+        if (g.w > 0) d.atlas.version +%= 1;
         return g;
     }
 
@@ -713,16 +725,17 @@ test "only private-use characters are looked up in the symbols font" {
 test "a companion font draws into its owner's atlas and snaps to its own sizes" {
     var owner = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
     defer owner.deinit();
-    const before = owner.version();
     // A second face (here the same file) at three sizes only.
     var mono = try Font.initCompanion(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), &owner, &.{ 12, 14, 16 });
     defer mono.deinit();
-    try std.testing.expect(owner.version() != before);
     try std.testing.expectEqual(owner.pixels.ptr, mono.pixels.ptr);
     try std.testing.expectEqual(@as(f32, 16), mono.strike(40).size);
     try std.testing.expectEqual(@as(f32, 12), mono.strike(6).size);
-    // Its glyphs are pixels in the shared atlas, and new ones bump the owner's version.
-    const g = mono.strike(14).glyph('M');
+    // Its glyphs rasterize into the shared atlas as they are drawn, bumping the owner's version.
+    const before = owner.version();
+    var i: usize = 0;
+    const g = mono.next(mono.strike(14), "M", &i);
+    try std.testing.expect(owner.version() != before);
     var inked = false;
     for (0..g.h) |y| for (0..g.w) |x| {
         if (owner.pixels[(@as(usize, g.y) + y) * atlas_width + g.x + x] > 0) inked = true;
@@ -732,4 +745,20 @@ test "a companion font draws into its owner's atlas and snaps to its own sizes" 
     try std.testing.expect(mono.measure("\u{e9}", 14) > 0);
     try std.testing.expect(owner.version() != cached);
     try std.testing.expectEqual(owner.corner, mono.corner);
+}
+
+test "a companion font loads into a nearly full atlas, taking room only for what it draws" {
+    var owner = try Font.init(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"));
+    defer owner.deinit();
+    // As in an editor whose UI font's strikes take all but 40 rows.
+    const shelf = &owner.dynamic.atlas.shelf;
+    shelf.x = 2;
+    shelf.y = atlas_height - 40;
+    shelf.row_h = 0;
+    var title = try Font.initCompanion(std.testing.allocator, @embedFile("assets/OpenSans-Regular.ttf"), &owner, &.{ 12, 16, 24, 32, 48, 64 });
+    defer title.deinit();
+    try std.testing.expectEqual(atlas_height - 40, shelf.y);
+    try std.testing.expect(title.measure("Keep", 16) > title.measure("K", 16));
+    var i: usize = 0;
+    try std.testing.expect(title.next(title.strike(16), "K", &i).w > 0);
 }
