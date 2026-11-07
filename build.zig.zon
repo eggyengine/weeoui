@@ -17,8 +17,8 @@
             .lazy = true,
         },
         .vitellus = .{
-            .url = "git+https://github.com/eggyengine/vitellus#5d7621e14c6a34ac05a2711c6ca1e72155a40a0f",
-            .hash = "vitellus-0.1.0-JC2CjMKtDAC91zNlyD7pc7Z__Krnn_XPOvp2LqCXmZeR",
+            .url = "git+https://github.com/eggyengine/vitellus#6ab8898ce5f9167bb67149b6524fc6db0effbce9",
+            .hash = "vitellus-0.1.0-JC2CjMqtDABAlwmXW36iG3vh7fyfqHWiivFQ57FgQ7Zn",
             .lazy = true,
         },
         .android = .{
