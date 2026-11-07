@@ -4,7 +4,7 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .eggenvector = .{
-            .url = "git+https://github.com/eggyengine/eggenvector#67b5b202495539bb34aec9941aec3ad24b5752ec",
+            .url = "git+https://git.tirbo.fish/eggy/eggenvector#67b5b202495539bb34aec9941aec3ad24b5752ec",
             .hash = "eggenvector-0.0.0-UyZb9BwkAgBS9Aa5WxM4mo9UPk19qgXX44kkfEmyNxt3",
         },
         .freetype = .{
@@ -12,17 +12,17 @@
             .hash = "freetype-2.14.3-C3-WdXSKAAB-kHs4qgRoeoFnRkNQn6M_SSlUGZ6ywgBQ",
         },
         .sdl3 = .{
-            .url = "git+https://github.com/eggyengine/zig-sdl3#2a9dd9d1619465f7e1636a59610df0680a6865c0",
+            .url = "git+https://git.tirbo.fish/eggy/zig-sdl3#2a9dd9d1619465f7e1636a59610df0680a6865c0",
             .hash = "sdl3-0.2.3-NmT1Q5QDKgDxnXbpAqG3QS216p0peNKlJKGhvJSELJs3",
             .lazy = true,
         },
         .vitellus = .{
-            .url = "git+https://github.com/eggyengine/vitellus#32f2ff1bae5b05f724b5a5ad0f580686860e8ec4",
+            .url = "git+https://git.tirbo.fish/eggy/vitellus#32f2ff1bae5b05f724b5a5ad0f580686860e8ec4",
             .hash = "vitellus-0.1.0-JC2CjMqtDABAlwmXW36iG3vh7fyfqHWiivFQ57FgQ7Zn",
             .lazy = true,
         },
         .android = .{
-            .url = "git+https://github.com/eggyengine/zig-android-sdk?ref=zig-0.17#319734de5f43d9c478ead4ff35ebe564b588be7c",
+            .url = "git+https://git.tirbo.fish/eggy/zig-android-sdk?ref=zig-0.17#319734de5f43d9c478ead4ff35ebe564b588be7c",
             .hash = "android-0.3.0-7iz7Qn5MAgCPmeMnCCYhLLHkxY5r8gTy_vKmrATmrnEB",
             .lazy = true,
         },

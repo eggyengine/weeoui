@@ -6,7 +6,7 @@ title: Introduction
 
 # Weeoui
 
-Weeoui is an immediate-mode UI library for Zig. It is used by the [Eggy](https://github.com/eggyengine/eggy) engine.
+Weeoui is an immediate-mode UI library for Zig. It is used by the [Eggy](https://git.tirbo.fish/eggy/eggy) engine.
 
 You describe the UI every frame from your own state, and each widget call returns what the user did with it. Weeoui keeps no widget objects for you to create, update or destroy:
 
@@ -35,7 +35,7 @@ fn frame(count: *u32, ctx: *ui.Context) !void {
 | --- | --- | --- |
 | `weeoui` | always | `Context`, widgets, layout, fonts and images. Has no platform dependencies. |
 | `weeoui_sdl3` | `.sdl3 = true` | SDL3 input, windowing, and `run`, which handles the whole frame loop for you. |
-| `weeoui_vitellus` | `.vitellus = true` | GPU rendering through [Vitellus](https://github.com/eggyengine/vitellus). |
+| `weeoui_vitellus` | `.vitellus = true` | GPU rendering through [Vitellus](https://git.tirbo.fish/eggy/vitellus). |
 
 ## Where to go next
 

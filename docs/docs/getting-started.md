@@ -10,7 +10,7 @@ Weeoui requires Zig `0.17.0`.
 ## Add the dependency
 
 ```bash
-zig fetch --save git+https://github.com/eggyengine/weeoui
+zig fetch --save git+https://git.tirbo.fish/eggy/weeoui
 ```
 
 ## build.zig

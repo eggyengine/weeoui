@@ -1,6 +1,9 @@
 # weeoui
 
-_weeoui_ (meaning small user interface, yes yes, or ykw depending on your mindset) is a fast UI library written in Zig and used in the [eggy](https://github.com/eggyengine/eggy) engine project.
+> [!NOTE]
+> This repository has migrated to [git.tirbo.fish/eggy/weeoui](https://git.tirbo.fish/eggy/weeoui).
+
+_weeoui_ (meaning small user interface, yes yes, or ykw depending on your mindset) is a fast UI library written in Zig and used in the [eggy](https://git.tirbo.fish/eggy/eggy) engine project.
 
 ![weeoui component gallery. run with `zig build gallery`](docs/image.png)
 
@@ -13,7 +16,7 @@ requires zig `0.17.0`
 
 to use this with the zig build system, import as so:
 ```bash
-zig fetch --save git+https://github.com/eggyengine/weeoui
+zig fetch --save git+https://git.tirbo.fish/eggy/weeoui
 ```
 
 and then in `build.zig`:

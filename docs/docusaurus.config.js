@@ -16,7 +16,7 @@ export default {
       {
         docs: {
           routeBasePath: '/',
-          editUrl: `https://github.com/eggyengine/weeoui/edit/${process.env.DOCS_BRANCH ?? 'main'}/docs/`,
+          editUrl: `https://git.tirbo.fish/eggy/weeoui/_edit/${process.env.DOCS_BRANCH ?? 'main'}/docs/`,
         },
         blog: false,
       },
@@ -32,7 +32,7 @@ export default {
         { to: 'pathname:///api/', label: 'API reference', position: 'left' },
         // The component gallery built for WebGPU, copied to build/demo by the workflow.
         { to: 'pathname:///demo/', label: 'Live demo', position: 'left' },
-        { href: 'https://github.com/eggyengine/weeoui', label: 'GitHub', position: 'right' },
+        { href: 'https://git.tirbo.fish/eggy/weeoui', label: 'Source', position: 'right' },
       ],
     },
     prism: { additionalLanguages: ['zig', 'bash'] },
